@@ -221,49 +221,52 @@ class Acceptor(object):
         self.accepted = (new_state, ballot_number)
         return ("CONFIRM", "CONFIRM")
 
+if __name__ == '__main__':
+    a1 = Acceptor(name='a1')
+    a2 = Acceptor(name='a2')
+    a3 = Acceptor(name='a3')
+    a4 = Acceptor(name='a4')
+    a5 = Acceptor(name='a5')
 
-a1 = Acceptor(name='a1')
-a2 = Acceptor(name='a2')
-a3 = Acceptor(name='a3')
-a4 = Acceptor(name='a4')
-a5 = Acceptor(name='a5')
+
+    def change_func(state):
+        """
+        http://rystsov.info/2015/09/16/how-paxos-works.html
+        It's a common practice for storages to have write operations to mutate its state and read operations to query it.
+        Paxos is different, it guarantees consistency only for write operations,
+        so to query/read its state the system makes read, writes the state back and when the state change is accepted the system queries the written state.
+
+        ie:
+        It's impossible to read a value in Single Decree Paxos without modifying the state of the system.
+        For example if you connect only to one acceptor then you may get stale read.
+        If you connect to a quorum of the acceptors then each acceptor may return a different value, so you should pick a value with the largest ballot number and send it back to acceptors.
+        Once you get a confirmation of the successful write then you can return the written value to the client as the current value.
+        So in order to read you should write.
+
+        ie:
+        https://twitter.com/rystsov/status/971796687642550277
+        There is no native read or write operations in CASPaxos, the only primitive is change:
+        apply a function to the stored value and return an updated value to a client.
+        If the function is "lambda x: x" we get a read, if it's "lambda x: x+1" then it's increment
+        and the "lambda x: f(x) if p(x) else x" is conditional write.
+        So from this perspective there reads are almost indistinguishable from writes.
+        """
+        return state + 3
 
 
-def change_func(state):
-    """
-    http://rystsov.info/2015/09/16/how-paxos-works.html
-    It's a common practice for storages to have write operations to mutate its state and read operations to query it.
-    Paxos is different, it guarantees consistency only for write operations,
-    so to query/read its state the system makes read, writes the state back and when the state change is accepted the system queries the written state.
+    def read_func(state):
+        return state
 
-    ie:
-    It's impossible to read a value in Single Decree Paxos without modifying the state of the system.
-    For example if you connect only to one acceptor then you may get stale read.
-    If you connect to a quorum of the acceptors then each acceptor may return a different value, so you should pick a value with the largest ballot number and send it back to acceptors.
-    Once you get a confirmation of the successful write then you can return the written value to the client as the current value.
-    So in order to read you should write.
-    
-    ie:
-    https://twitter.com/rystsov/status/971796687642550277
-    There is no native read or write operations in CASPaxos, the only primitive is change:
-    apply a function to the stored value and return an updated value to a client.
-    If the function is "lambda x: x" we get a read, if it's "lambda x: x+1" then it's increment
-    and the "lambda x: f(x) if p(x) else x" is conditional write. 
-    So from this perspective there reads are almost indistinguishable from writes.
-    """
-    return state + 3
 
-def read_func(state):
-    return state
+    def set_func(state):
+        return state + 3
 
-def set_func(state):
-    return state + 3
 
-acceptorsList = [a1, a2, a3, a4, a5]
-p = Proposer(acceptors=acceptorsList)
-result = p.receive(change_func)
+    acceptorsList = [a1, a2, a3, a4, a5]
+    p = Proposer(acceptors=acceptorsList)
+    result = p.receive(change_func)
 
-print "result::", result
+    print('result::', result)
 
-for acceptor in acceptorsList:
-    print "acceptor accepted", acceptor.accepted
+    for acceptor in acceptorsList:
+        print('acceptor accepted', acceptor.accepted)

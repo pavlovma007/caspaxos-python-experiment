@@ -28,9 +28,13 @@ class AcceptorKorni3(object) :
 
     def __init__(self, partition: str, korni3container: str, zU: str):
         self.partitionId = partition
-        self.tableName = 'PaxosAcceptor'+'-'+self.partitionId
+        self.tableName = 'PaxosAcceptor'+'-' + partition
         self.mePubKey = zU
-        #r = subprocess.run(["korni3", "db", self.korni3container], capture_output=True)
+
+        self.preqtable =  'REQ-PREPARE-Part-' + partition
+        self.presptable = 'RESP-PREPARE-Part-' + partition
+        self.areqtable =  'REQ-ACCEPT-Part-' + partition
+        self.aresptable = 'RESP-ACCEPT-Part-' + partition
 
         self.korni3container = korni3container
         r = subprocess.run(["korni3", "db", self.korni3container], capture_output=True)
@@ -41,14 +45,9 @@ class AcceptorKorni3(object) :
     def _write(self, register: str, promise, accepted): # return void
         if self._validate(register): return None
 
-        # RUN korni3 insert new version for ...
-        # korni3 insert  self.korni3container PaxosAcceptor<PartitionId>
-        # {"id": register, "promise": , "accepted": }
-
         data = {"id": register, "promise": promise, "accepted": accepted}
-        # data_str = json.dumps(data)
-        p2 = subprocess.run(['korni3', 'insert', self.korni3container, self.tableName], # , '--ignore'
-                            input=json.dumps(data).encode('utf-8'), capture_output=True)
+        # , '--ignore'
+        p2 = subprocess.run(['korni3', 'insert', self.korni3container, self.tableName], input=json.dumps(data).encode('utf-8'), capture_output=True)
 
     def _read(self, registerKey: str) :  # return tuple ( promise, accepted: (0,0) )
         if self._validate(registerKey): return None
@@ -92,33 +91,23 @@ class AcceptorKorni3(object) :
         """
         # logger.info("accept. name={0}. ballot_number={1}. new_state={2}. promise={3}. accepted={4}".format(
         #     self.name, ballot_number, new_state, self.promise, self.accepted))
-
         if self._validate(register): return None
-
         promise, accepted = self._read(register)
-
         if promise > ballot_number:
             return ("CONFLICT", "CONFLICT")
         elif accepted[1] > ballot_number:
             # https://github.com/peterbourgon/caspaxos/blob/4374c3a816d7abd6a975e0e644782f0d03a2d05d/protocol/memory_acceptor.go#L118-L128
             return ("CONFLICT", "CONFLICT")
-
         # these two ought to be flushed to disk
         # http://rystsov.info/2015/09/16/how-paxos-works.html
-        #self.promise = 0
-        #self.accepted = (new_state, ballot_number)
-        self._write(register, 0, (new_state, ballot_number) )
-
+        self._write(register, 0, (new_state, ballot_number) ) #self.promise = 0 ; self.accepted = (new_state, ballot_number)
         return ("CONFIRM", "CONFIRM")
 
     # handler are periodicaly called for check new req data
     def checkPrepareRequestsHandler(self):
-        preqtable = 'REQ-PREPARE-Part-' + self.partitionId
-        presptable = 'RESP-PREPARE-Part-' + self.partitionId
-
         # TODO perf. add cond this and prev day by zT ?
         try:
-            self.cur.execute('select b,id, zT, zU from "' + preqtable +'" where aid=? and not handled',
+            self.cur.execute('select b,id, zT, zU from "' + self.preqtable +'" where aid=? and not handled',
                              (self.mePubKey,))
             for record in self.cur.fetchall():
                 ballot = record[0]
@@ -128,30 +117,26 @@ class AcceptorKorni3(object) :
 
                 mayBeConfirm = self.prepare(register, ballot)
 
-
                 def _sendPrepareResponse():
                     data = {"id": register, "b": ballot, "resp": mayBeConfirm,
                             "handled": False, #"aid": self.zU   no need
                             "proposerId": proposerId, "part": self.partitionId}
-                    p1 = subprocess.run(['korni3', 'insert', self.korni3container, presptable],
-                                   input=json.dumps(data).encode('utf-8'), capture_output=True)
+                    p1 = subprocess.run(['korni3', 'insert', self.korni3container, self.presptable], input=json.dumps(data).encode('utf-8'), capture_output=True)
                     if p1.returncode > 0:
                         print('ERROR Acceptor checkPrepareRequestsHandler ', p1.stdout.read()) # TODO
                 _sendPrepareResponse()
 
                 # mark it handled for not handle again # its small hack but is normaly
-                self.cur.execute('update "'+preqtable+'" set handled = true where id=? and zT = ?', (register, zT))
+                self.cur.execute('update "'+self.preqtable+'" set handled = true where id=? and zT = ?', (register, zT))
                 self.cur.connection.commit()
         except sqlite3.OperationalError as e:
             print('ERROR ', e)
 
     # periodycaly called for check Accept REQ for me
     def checkAcceptRequestsHandler(self):
-        areqtable = 'REQ-ACCEPT-Part-'+self.partitionId
-        aresptable = 'RESP-ACCEPT-Part-'+self.partitionId
         try:
             self.cur.execute('select reg, b, v, id, zT, zU '+
-                             'from "' + areqtable + '" where aid=?'+
+                             'from "' + self.areqtable + '" where aid=?'+
                              'and not handled\n'+
                              '-- TODO zU is valid proposer\n'+
                              '--order by zT DESC', (self.mePubKey,))
@@ -170,15 +155,14 @@ class AcceptorKorni3(object) :
                     data={"id": id, # same as in request
                           "reg": register, "breq": b, "proposerId": zU,
                           "acceptation": [aa,ab], "handled": False}
-                    p = subprocess.run(['korni3', 'insert', self.korni3container, aresptable],
-                                       input=json.dumps(data).encode('utf-8'), capture_output=True)
+                    p = subprocess.run(['korni3', 'insert', self.korni3container, self.aresptable], input=json.dumps(data).encode('utf-8'), capture_output=True)
                 _sendAcceptResponse()
                 # mark as handled
                 reqsformark.append([id,zT])
 
             # mark req as handled
             for r in reqsformark:
-                self.cur.execute('update "'+areqtable+'" set handled=1 where id=?'+
+                self.cur.execute('update "' + self.areqtable + '" set handled=1 where id=?'+
                                  ' and zT=?',
                                  (r[0], r[1]))
             self.cur.connection.commit()
@@ -197,22 +181,17 @@ class ProposerKorni3(object):
     10. Waits for the F + 1 confirmations.
     11. Returns the new state to the client.
     """
-
-    #acceptors acceptor list . TODO WHAT IS IT?
-    #state 0,1,2
-    #F number from paper (like quorum)
-
-    # mePubKey
-    #korni3container
-    #cur sqlite cursor
-    #partitionId
-
     def __init__(self, acceptors, korni3container, partitionId: str, mePubKey: str):
         self.mePubKey = mePubKey
         self.tableName = 'StateProposerLocal' # local state of proposer for registry
         self.partitionId = partitionId
+        self.inreqtable = 'PAXOS-CHANGE-REQ-Part-' + partitionId
+        self.outtable =   'PAXOS-RESULT-Part-' + partitionId
+        self.preqtable =  'REQ-PREPARE-Part-' + partitionId
+        self.presptable = 'RESP-PREPARE-Part-' + partitionId
+        self.areqtable =  'REQ-ACCEPT-Part-' + partitionId
+        self.aresptable = 'RESP-ACCEPT-Part-' + partitionId
 
-        # TODO: note that a node can be both a proposer and an acceptor at the same time
         # in fact most times they usually are.
         # So we should add logic to handle that fact.
         if not isinstance(acceptors, list):
@@ -220,7 +199,6 @@ class ProposerKorni3(object):
         self.acceptors = acceptors
         # since we need to have 2F+1 acceptors to tolerate F failures, then:
         self.F = (len(self.acceptors) - 1) / 2
-        #self.state = 0
 
         # logger.info(
         #     "Init Proposer. acceptors={0}. F={1}. initial_state={2}".format(
@@ -258,7 +236,6 @@ class ProposerKorni3(object):
         # we should never generate a random number that is equal to zero
         # since Acceptor.promise defaults to 0
         #ballot_number = random.randint(notLessThan + 1, 100)
-
         ballot_number = int(time.time())
         return ballot_number
 
@@ -267,8 +244,8 @@ class ProposerKorni3(object):
                 "register": register, "F": self.F, "b": ballot,
                 "fId": functionId, "nextValue": nextValue, "state": state,
                 "reqid": reqid}
-        p2 = subprocess.run(['korni3', 'insert', self.korni3container, self.tableName],  # , '--ignore'
-                            input=json.dumps(data).encode('utf-8'), capture_output=True)
+        # , '--ignore'
+        p2 = subprocess.run(['korni3', 'insert', self.korni3container, self.tableName], input=json.dumps(data).encode('utf-8'), capture_output=True)
 
     def _read(self, register: str):
         """ return (b,fId,next,state, F, reqid) """
@@ -286,24 +263,16 @@ class ProposerKorni3(object):
             return (b,fId,next,state, F, reqid)
         else:
             raise Exception('can not read proposer state')
-    def _readPConfirmations(self, registry, ballot):
-        pass
 
     def _sendPrepareRequest(self, acceptorPub: str, register: str, ballot):
         data = {"id": register, "type": 'prepare', "aid": acceptorPub, "b": ballot,
                 "handled": False }
-
-        # print(hashlib.sha256(register.encode('utf-8')).hexdigest()[:3].upper())
-        partition = partitionFromRegKey(register)
-
-        tableName = 'REQ-PREPARE-Part-'+str(partition)
-        p1 = subprocess.run(['korni3', 'insert', self.korni3container, tableName], input=json.dumps(data).encode('utf-8'), capture_output=True)
+        p1 = subprocess.run(['korni3', 'insert', self.korni3container, self.preqtable], input=json.dumps(data).encode('utf-8'), capture_output=True)
         return p1.returncode
 
     def send_prepare(self, register: str, ballot_number, funcId: str, nextValue, reqid):
         for acceptor in self.acceptors:
-            # RPC. make request and wait response
-            self._sendPrepareRequest(str(acceptor), register, ballot_number)
+            self._sendPrepareRequest(str(acceptor), register, ballot_number) # RPC. make request and wait response
         # save state and wait resp ...
         self._write(register, ballot_number, funcId, nextValue, 0, reqid)
 
@@ -311,7 +280,6 @@ class ProposerKorni3(object):
         total_list_of_confirmation_values = []
         for i in confirmations:
             total_list_of_confirmation_values.append(i[0])
-
         # If they(confirmations) all contain the empty value,
         # then the proposer defines the current state as PHI otherwise it picks the
         # value of the tuple with the highest ballot number.
@@ -323,7 +291,6 @@ class ProposerKorni3(object):
             highest_confirmation = self.get_highest_confirmation(confirmations)
             state = highest_confirmation[0]
         self._write(register, s_b, s_fId, s_next, state, s_reqid)
-
         self.send_accept(register, funcId, ballot, state, s_next, s_reqid)
 
     # clean function, no side effects
@@ -333,24 +300,20 @@ class ProposerKorni3(object):
             ballots.append(i[1])
         ballots = sorted(ballots)
         highestBallot = ballots[len(ballots) - 1]
-
         for i in confirmations:
             if i[1] == highestBallot:
                 return i
 
     def _sendAcceptRequest(self, acceptor, register, ballot_number, new_state):
-        table = 'REQ-ACCEPT-Part-' + self.partitionId
         data={"id": json.dumps([register, ballot_number]),  "type": 'accept', "aid": acceptor,
               "reg":register,
               "b": ballot_number, "v": new_state, "handled": 0}
-        p = subprocess.run(['korni3', 'insert', self.korni3container, table],
-                           input=json.dumps(data).encode('utf-8'))
+        p = subprocess.run(['korni3', 'insert', self.korni3container, self.areqtable], input=json.dumps(data).encode('utf-8'))
 
     def send_accept(self, register, fId, ballot_number, state, nextValue, reqid):
         """
         7. Applies the f function to the current state and sends the result, new state, along with the generated ballot number B (an "accept" message) to the acceptors.
         """
-
         # transform state and save it
         f = getFunction(fId)
         if not f:
@@ -358,95 +321,31 @@ class ProposerKorni3(object):
         else:
             state = f(state, nextValue)
             self._write(register, ballot_number, fId, nextValue, state, reqid)
-
-            acceptations = []
             for acceptor in self.acceptors:
-                #acceptation = acceptor.accept(ballot_number=ballot_number, new_state=self.state)
-                #RPC
-                self._sendAcceptRequest(acceptor, register, ballot_number, state)
-
-            # then wait and then when response quorum , then accept2
+                self._sendAcceptRequest(acceptor, register, ballot_number, state) # RPC
+            # then wait and then when response quorum , and then - accept2
 
     def accept2(self, reg, b, breq, F, fId, state, reqid, isConfirm: bool):
-        table = 'PAXOS-RESULT-Part-' + self.partitionId
         if str(b) == str(breq):
-            data = {"id": reqid, "reg": reg, "breq": breq,
-                    "fId": fId,
-                    "bresult": b, "F": F,  # , "proposerId": self.mePubKey, - zU
-                    "state": state if isConfirm else 'CONFLICT',
+            data = {"id": reqid, "reg": reg, "fId": fId,
+                    "b": b, "F": F,  # , "proposerId": self.mePubKey, - zU
+                    "result": 'CONFIRM' if isConfirm else 'CONFLICT',
+                    "state": state,
                     "handled": False}
             # todo ? добавить в ответ все связанные документы с подписями ? или написать отдельный отчет?
             # todo проверить перед созданием ответа, что он еще не существует. ? --ignore
-            subprocess.run(['korni3', 'insert', self.korni3container, table, '--ignore'],
-                           input=json.dumps(data).encode('utf-8'), capture_output=True)
+            subprocess.run(['korni3', 'insert', self.korni3container, self.outtable, '--ignore'], input=json.dumps(data).encode('utf-8'), capture_output=True)
 
     def checkPrepareConfirmsHandler_RESP_PREPARE(self):
-        reqTable = "REQ-PREPARE-Part-"+self.partitionId
-        resTable = "RESP-PREPARE-Part-" + self.partitionId
-
-    #     def confirms():
-    #         try:
-    #             self.cur.execute("""
-    # select id as reg,  zT, zU as aid, b , resp
-    # from \"""" +resTable+ """\"
-    # --group by
-    # where
-    #     -- for me
-    #     proposerId=?
-    #     and b in (select b from (select register, b, max(zT) as zT from StateProposerLocal
-    #                 group by
-    #                     register, b
-    #                 -- is me write
-    #                 having zU=?
-    #             ))
-    #     and not handled
-    #     order by zT desc
-    #             """, (self.mePubKey, self.mePubKey))
-    #             confirms = dict()
-    #             for record in self.cur.fetchall():
-    #                 reg = record[0]
-    #                 b = record[3]
-    #                 if (reg,b) not in confirms:
-    #                     confirms[(reg,b)] = [record]
-    #                 else:
-    #                     confirms[(reg, b)].append(record)
-    #             for reg,bFromConf in confirms:
-    #                 records = confirms[(reg, bFromConf)]
-    #                 try:
-    #                     b, fId, next, state, F, reqid = self._read(reg)
-    #                     if len(records)>F:
-    #                         # we has достаточно confirms
-    #                         confirmsList = []
-    #                         aids = set()
-    #                         for r in records:
-    #                             resp = json.loads(r[4])
-    #                             aid = r[2] # todo check AID
-    #                             if aid not in aids:
-    #                                 aids.add(aid)
-    #                                 confirmsList.append(resp)
-    #                         self.prepare2(reg, b, fId, confirmsList)
-    #                     #mark req as handled
-    #                     self.cur.execute('update "'+resTable+'"  set handled=1 where proposerId=? ' +
-    #                                      'and b=? and id=?  ',
-    #                                      (self.mePubKey, bFromConf, reg))
-    #                     self.cur.connection.commit()
-    #                 except Exception:
-    #                     pass
-    #         except sqlite3.OperationalError:
-    #             pass
-    #     #confirms()
-
         def confirms2():
             try:
-                self.cur.execute('select id,zT,b,resp,zU from "'+resTable+'" '
+                self.cur.execute('select id,zT,b,resp,zU from "' + self.presptable + '" '
                                  'where not handled and proposerId=?',
                                  (self.mePubKey, ))
                 confirmations = dict()
                 for record in self.cur.fetchall():
                     id = record[0]
-                    zT = record[1]
                     b= record[2]
-
                     key = (id,b)
                     if not key in confirmations:
                         confirmations[key] = [record]
@@ -456,7 +355,6 @@ class ProposerKorni3(object):
                     records = confirmations[(reg,b)]
                     try:
                         s_b, fId, next, state, F, reqid = self._read(reg)
-
                         confirmsList = []
                         aids = set()
                         for r in records:
@@ -465,14 +363,11 @@ class ProposerKorni3(object):
                             if aid not in aids:
                                 aids.add(aid)
                                 confirmsList.append(resp)
-
                         if len(confirmsList) >= F + 1:
                             # we has достаточно confirms
-
                             self.prepare2(reg, b, fId, confirmsList)
-
                             # mark req as handled
-                            self.cur.execute('update "' + resTable + '"  set handled=1 where proposerId=? ' +
+                            self.cur.execute('update "' + self.presptable + '"  set handled=1 where proposerId=? ' +
                                          'and b=? and id=?  ',
                                          (self.mePubKey, b, reg))
                         self.cur.connection.commit()
@@ -483,9 +378,8 @@ class ProposerKorni3(object):
         confirms2()
 
     def checkAcceptConfirmsHandler(self):
-        aresptable='RESP-ACCEPT-Part-'+self.partitionId
         try:
-            self.cur.execute('select id, zT, breq, reg, acceptation from "'+aresptable+'" ' +
+            self.cur.execute('select id, zT, breq, reg, acceptation from "' + self.aresptable + '" ' +
                              'where "proposerId"=? 	AND not handled',
                              (self.mePubKey, ))
             confirmations = dict()
@@ -509,14 +403,12 @@ class ProposerKorni3(object):
                 # но на момент ответа Proposer может быть пересоздан с другим списком acceptors
                 #  считаем что текущий список acceptors согласован и можно бы пересчитать данный F
                 # ПОДУМАТЬ ОБ ЭТОМ!
-
                 if len(infoList) >= F + 1:
                     # число ответов достаточно чтобы вычислить результат и сообщить о нем
-
                     def _publishResult(isConfirm: bool):
                         self.accept2(reg, b, breq, F, fId, state, reqid, isConfirm)
                     def _makrConfirmsAsHandled():
-                        self.cur.execute('update "' + aresptable + '" set handled=1 where id=?',
+                        self.cur.execute('update "' + self.aresptable + '" set handled=1 where id=?',
                                          (json.dumps([reg, breq]), ))
                         self.cur.connection.commit()
                     # confirm OR conflict ?
@@ -535,7 +427,7 @@ class ProposerKorni3(object):
                         # если ответ is CONFLICT тоже пометить для удаления
                         def _conflictRespAsHandled():
                             for i in infoList:
-                                self.cur.execute('update "' + aresptable + '" set handled=1 where ' +
+                                self.cur.execute('update "' + self.aresptable + '" set handled=1 where ' +
                                                  ' id=? and zT=?',
                                                  (i["id"], i["zT"]))
                             self.cur.connection.commit()
@@ -544,9 +436,8 @@ class ProposerKorni3(object):
             pass
 
     def checkInputRequest(self):
-        table = 'PAXOS-CHANGE-REQ-Part-' + self.partitionId
         self.cur.execute('select id, zT, reg, fId, next ' 
-                         'from "'+table+'"  where not handled ')
+                         'from "' + self.inreqtable + '"  where not handled ')
         fordelete = list()
         for record in self.cur.fetchall():
             id = record[0]
@@ -560,7 +451,7 @@ class ProposerKorni3(object):
             fordelete.append( (id, zT) )
         #mark req as handled
         for id, zT in fordelete:
-            self.cur.execute('update "'+table+'" set handled=1 where id=? and zT=?',
+            self.cur.execute('update "' + self.inreqtable + '" set handled=1 where id=? and zT=?',
                              (id, zT))
             self.cur.connection.commit()
 
@@ -572,8 +463,7 @@ def paxosKorni3ClientRequest(key: str, function_id: str, nextValue, korni3contai
     table = 'PAXOS-CHANGE-REQ-Part-'+partitionFromRegKey(key)
     id = str(uuid.uuid4())
     data = {"id": id, "reg": key, "fId": function_id, "next": nextValue, "handled": False}
-    p = subprocess.run(['korni3', 'insert', korni3container, table],
-                       input=json.dumps(data).encode('utf-8'))
+    p = subprocess.run(['korni3', 'insert', korni3container, table], input=json.dumps(data).encode('utf-8'))
     if p.returncode != 0:
         print('ERROR run korni3 ', p.stderr.read(), p.stdout.read())
     else:
@@ -588,18 +478,21 @@ def paxosKorni3GetChecker(containerName: str):
     def paxosKorni3ClientCheckResult(reqid, key):
         # --
         partitionId = partitionFromRegKey(key)
-        cur.execute('select state, id, zT from "PAXOS-RESULT-Part-'+partitionId+'" where id=? and reg=?',
-                    (reqid, key) )
         try:
-            r = cur.fetchone()
-            val = json.loads(r[0]) # 'CONFLICT' - is not value
-            # mark as handled
-            cur.execute('update "PAXOS-RESULT-Part-'+partitionId+'" set handled=1 where id=? and zT=?',
-                        (r[1], r[2]))
-            con.commit()
-            #
-            return val if val!='CONFLICT' else None # TODO ? сделать чтобы значение могло быть CONFLICT
-        except TypeError:
+            cur.execute('select state, id, zT from "PAXOS-RESULT-Part-'+partitionId+'" where id=? and reg=?',
+                        (reqid, key) )
+            try:
+                r = cur.fetchone()
+                val = json.loads(r[0]) # 'CONFLICT' - is not value
+                # mark as handled
+                cur.execute('update "PAXOS-RESULT-Part-'+partitionId+'" set handled=1 where id=? and zT=?',
+                            (r[1], r[2]))
+                con.commit()
+                #
+                return val if val!='CONFLICT' else None # TODO ? сделать чтобы значение могло быть CONFLICT
+            except TypeError:
+                return None
+        except sqlite3.OperationalError:
             return None
     return paxosKorni3ClientCheckResult
 
@@ -623,7 +516,7 @@ if __name__ == '__main__':
     print('a1.accept(k1,101, 3)', a1.accept('k1',101, 3))
     a1.checkPrepareRequestsHandler()
 
-    # TODO version
+    # TODO version CAS
     def change_func(state, nextValue):
         """
         http://rystsov.info/2015/09/16/how-paxos-works.html

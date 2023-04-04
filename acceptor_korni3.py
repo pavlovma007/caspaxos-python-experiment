@@ -305,7 +305,10 @@ class ProposerKorni3(object):
             b = r[2]
             fId = r[3]
             state = r[4]
-            next = r[5]
+            next = r[5] #scalar
+            try:
+                next = json.loads(next)
+            except Exception: pass
             reqid = r[6]
             return (b,fId,next,state, F, reqid)
         else:
@@ -568,13 +571,13 @@ if __name__ == '__main__':
     partitionK2 = partitionFromRegKey('k2')
 
     a1 = AcceptorKorni3(partition=partitionK1, korni3container='paxos', zU=mePub)
-    print('a1.prepare 12', a1.prepare('k1', 12))
-    print('a1.accept(k1,11, 3)', a1.accept('k1',11, 3))
-    print("a1._read('k1')", a1._read('k1'))
-    print('a1.prepare 101', a1.prepare('k1', 101))
-    print("a1._read('k1')", a1._read('k1'))
-    print('a1.accept(k1,101, 3)', a1.accept('k1',101, 3))
-    a1.checkPrepareRequestsHandler()
+    # print('a1.prepare 12', a1.prepare('k1', 12))
+    # print('a1.accept(k1,11, 3)', a1.accept('k1',11, 3))
+    # print("a1._read('k1')", a1._read('k1'))
+    # print('a1.prepare 101', a1.prepare('k1', 101))
+    # print("a1._read('k1')", a1._read('k1'))
+    # print('a1.accept(k1,101, 3)', a1.accept('k1',101, 3))
+    # a1.checkPrepareRequestsHandler()
 
     # TODO version CAS
     def change_func(state, nextValue):
@@ -600,7 +603,7 @@ if __name__ == '__main__':
         So from this perspective there reads are almost indistinguishable from writes.
         """
         if state == 0:
-            return {"version": 0, value: 0}
+            return change_func({"version": 0, "value": 0}, nextValue)
 
         if type(state)==dict and 'version' in state   and   (nextValue['version']==state['version'] + 1) :
             return nextValue
@@ -622,7 +625,7 @@ if __name__ == '__main__':
             return set_func
 
     acceptorsList = [mePub]
-    # TODO create acceptors objects for range of partotions
+    # TODO create acceptors objects for range of partitions
 
     # todo make name a env param
     p = ProposerKorni3(acceptors=acceptorsList,
@@ -635,6 +638,7 @@ if __name__ == '__main__':
     # p.receive('k1', 'change_func', 3)
     # p.receive('k1', 'read_func', None)
     req1id = paxosKorni3ClientRequest('k1', 'read_func', 'NULL')
+    req2id = paxosKorni3ClientRequest('k1', 'change_func', {"version":1, "value": 123} )
     paxosKorni3ClientCheckResult = paxosKorni3GetChecker('paxos')
 
     ####################### handle requests and confirm and messages founded in files
@@ -660,6 +664,7 @@ if __name__ == '__main__':
             _checkPoposerRequests(p)
 
             v = paxosKorni3ClientCheckResult(req1id, 'k1') # TODO REMOVE. is test
+            v = paxosKorni3ClientCheckResult(req2id, 'k1')
             if not v is None : print('v=', v)
             # jobs end
         pause.until(t2)

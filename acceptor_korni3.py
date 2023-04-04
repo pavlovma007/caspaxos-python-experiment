@@ -526,7 +526,7 @@ def paxosKorni3GetChecker(containerName: str):
         try:
             cur.execute('SELECT * FROM sqlite_master WHERE type="index" and tbl_name=? and name=? ',
                              (table, name))
-            if not self.cur.fetchone():
+            if not cur.fetchone():
                 cur.execute(createquery)
         except sqlite3.OperationalError:
             pass

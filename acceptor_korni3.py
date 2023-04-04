@@ -36,11 +36,38 @@ class AcceptorKorni3(object) :
         self.areqtable =  'REQ-ACCEPT-Part-' + partition
         self.aresptable = 'RESP-ACCEPT-Part-' + partition
 
+
         self.korni3container = korni3container
         r = subprocess.run(["korni3", "db", self.korni3container], capture_output=True)
         path = r.stdout.decode('utf-8').strip()
         con = sqlite3.connect(path)
         self.cur = con.cursor()
+
+
+        def createIndex(name, table, createquery):
+            try:
+                self.cur.execute('SELECT * FROM sqlite_master WHERE type="index" and tbl_name=? and name=? ',
+                                 (table, name))
+                if not self.cur.fetchone():
+                    self.cur.execute(createquery)
+            except sqlite3.OperationalError: pass
+        createIndex("preq-aid-handled-"+self.partitionId, "REQ-PREPARE-Part-"+self.partitionId,
+                    'CREATE INDEX "preq-aid-handled-'+self.partitionId+
+                    '" ON "REQ-PREPARE-Part-'+self.partitionId+'" ( 	"aid", 	"handled" );')
+
+        createIndex("preq-handled-id-zT-"+self.partitionId , "REQ-PREPARE-Part-"+self.partitionId,
+                    'CREATE INDEX "preq-handled-id-zT-'+self.partitionId+'" ON "REQ-PREPARE-Part-'
+                    +self.partitionId+'" ( 	"handled", 	"id", 	"zT" );')
+
+        createIndex("areq-aid-handled-"+self.partitionId, "REQ-ACCEPT-Part-"+self.partitionId,
+                    'CREATE INDEX "areq-aid-handled-'+self.partitionId+
+                    '" ON "REQ-ACCEPT-Part-'+self.partitionId+'" (	"aid",	"handled");')
+
+        createIndex("areq-handled-aid-zT-"+self.partitionId, "REQ-ACCEPT-Part-"+self.partitionId,
+                    'CREATE INDEX "areq-handled-aid-zT-'+self.partitionId+
+                    '" ON "REQ-ACCEPT-Part-'+self.partitionId+'" (	"handled", 	"aid", 	"zT" );')
+        self.cur.connection.commit()
+
 
     def _write(self, register: str, promise, accepted): # return void
         if self._validate(register): return None
@@ -123,7 +150,7 @@ class AcceptorKorni3(object) :
                             "proposerId": proposerId, "part": self.partitionId}
                     p1 = subprocess.run(['korni3', 'insert', self.korni3container, self.presptable], input=json.dumps(data).encode('utf-8'), capture_output=True)
                     if p1.returncode > 0:
-                        print('ERROR Acceptor checkPrepareRequestsHandler ', p1.stdout.read()) # TODO
+                        print('ERROR Acceptor checkPrepareRequestsHandler ', p1.stdout.read())
                 _sendPrepareResponse()
 
                 # mark it handled for not handle again # its small hack but is normaly
@@ -210,9 +237,29 @@ class ProposerKorni3(object):
         con = sqlite3.connect(path)
         self.cur = con.cursor()
 
-        # todo shure index. register
-        # REQ-PREPARE-Part-6AB    aid b handled
-        # RESP-PREPARE-Part-6AB   b handled proposerId zU
+        # shure indexes
+        def createIndex(name, table, createquery):
+            try:
+                self.cur.execute('SELECT * FROM sqlite_master WHERE type="index" and tbl_name=? and name=? ',
+                                 (table, name))
+                if not self.cur.fetchone():
+                    self.cur.execute(createquery)
+            except sqlite3.OperationalError: pass
+        createIndex("proposer-register", "StateProposerLocal", 'CREATE INDEX "proposer-register" ON "StateProposerLocal" ( 	"register" );')
+        createIndex("presp-proposerid-handled-" + self.partitionId, "RESP-PREPARE-Part-" + self.partitionId,
+                    'CREATE INDEX "presp-proposerid-handled-' + self.partitionId + '" ON "RESP-PREPARE-Part-' + self.partitionId + '" ( 	"proposerId", 	"handled" );')
+        createIndex("presp-handled-proposer-b-id-" + self.partitionId, "RESP-PREPARE-Part-" + self.partitionId,
+                    'CREATE INDEX "presp-handled-proposer-b-id-' + self.partitionId + '" ON "RESP-PREPARE-Part-' + self.partitionId + '" ( 	"handled", 	"proposerId", 	"b", 	"id" );')
+        createIndex("aresp-proposerid-handled-" + self.partitionId, "RESP-ACCEPT-Part-" + self.partitionId,
+                    'CREATE INDEX "aresp-proposerid-handled-' + self.partitionId + '" ON "RESP-ACCEPT-Part-' + self.partitionId + '" ( 	"proposerId", 	"handled" );')
+        createIndex("aresp-handled-id-" + self.partitionId, "RESP-ACCEPT-Part-" + self.partitionId,
+                    'CREATE INDEX "aresp-handled-id-' + self.partitionId + '" ON "RESP-ACCEPT-Part-' + self.partitionId + '" ( 	"handled", 	"id" );')
+        createIndex("aresp-id-zT-" + self.partitionId, "RESP-ACCEPT-Part-" + self.partitionId,
+                    'CREATE INDEX "aresp-id-zT-' + self.partitionId + '" ON "RESP-ACCEPT-Part-' + self.partitionId + '" ( 	"id", 	"zT" );')
+        createIndex("inreq-handled-" + self.partitionId, "PAXOS-CHANGE-REQ-Part-" + self.partitionId,
+                    'CREATE INDEX "inreq-handled-' + self.partitionId + '" ON "PAXOS-CHANGE-REQ-Part-' + self.partitionId + '" ( 	"handled" );')
+        createIndex("inreq-id-zT-" + self.partitionId, "PAXOS-CHANGE-REQ-Part-" + self.partitionId,
+                    'CREATE INDEX "inreq-id-zT-' + self.partitionId + '" ON "PAXOS-CHANGE-REQ-Part-' + self.partitionId + '" ( "id", 	"zT" );')
 
     # start handling input request
     def receive(self, register: str, fId: str, nextValue, reqid):
@@ -475,9 +522,25 @@ def paxosKorni3GetChecker(containerName: str):
     path = r.stdout.decode('utf-8').strip()
     con = sqlite3.connect(path)
     cur = con.cursor()
+    def createIndex(name, table, createquery):
+        try:
+            cur.execute('SELECT * FROM sqlite_master WHERE type="index" and tbl_name=? and name=? ',
+                             (table, name))
+            if not self.cur.fetchone():
+                cur.execute(createquery)
+        except sqlite3.OperationalError:
+            pass
+    # TODO ? откуда клиент узнает в какой таблице ожидать результат? какую таблицу ему нужно загружать для проверки ?
+    # он конечно может вычислить (просто вызвать функцию), но пока что ему апи напрямую это не говорит
     def paxosKorni3ClientCheckResult(reqid, key):
         # --
         partitionId = partitionFromRegKey(key)
+        createIndex("result-id-reg-" + partitionId, "PAXOS-RESULT-Part-" + partitionId,
+                    'CREATE INDEX "result-id-reg-' + partitionId +
+                    '" ON "PAXOS-RESULT-Part-' + partitionId + '" ( "id", 	"reg" );')
+        createIndex("result-id-zT-" + partitionId, "PAXOS-RESULT-Part-" + partitionId,
+                    'CREATE INDEX "result-id-zT-' + partitionId +
+                    '" ON "PAXOS-RESULT-Part-' + partitionId + '" (  "id", 	"zT" );')
         try:
             cur.execute('select state, id, zT from "PAXOS-RESULT-Part-'+partitionId+'" where id=? and reg=?',
                         (reqid, key) )
@@ -485,17 +548,14 @@ def paxosKorni3GetChecker(containerName: str):
                 r = cur.fetchone()
                 val = json.loads(r[0]) # 'CONFLICT' - is not value
                 # mark as handled
-                cur.execute('update "PAXOS-RESULT-Part-'+partitionId+'" set handled=1 where id=? and zT=?',
-                            (r[1], r[2]))
+                cur.execute('update "PAXOS-RESULT-Part-'+partitionId+'" set handled=1 where id=? and zT=?', (r[1], r[2]))
                 con.commit()
-                #
-                return val if val!='CONFLICT' else None # TODO ? сделать чтобы значение могло быть CONFLICT
+                return val if val!='CONFLICT' else None # TODO ? сделать чтобы значение могло быть CONFLICT. надо просто больше тестировать и доулучшить
             except TypeError:
                 return None
         except sqlite3.OperationalError:
             return None
     return paxosKorni3ClientCheckResult
-
 
 if __name__ == '__main__':
     # sure, is container are exists ?
@@ -590,7 +650,7 @@ if __name__ == '__main__':
     # a1 - acceptor.   [a1] - acceptors list
     # p - proposer
 
-    CHECK_PERIOD = datetime.timedelta(seconds=5) # sec  # TODO make it a env var
+    CHECK_PERIOD = datetime.timedelta(seconds=3) # sec  # TODO make it a env var
     while True:
         t1 = datetime.datetime.now()
         t2 = t1 + CHECK_PERIOD
@@ -603,5 +663,4 @@ if __name__ == '__main__':
             if not v is None : print('v=', v)
             # jobs end
         pause.until(t2)
-
     #######################

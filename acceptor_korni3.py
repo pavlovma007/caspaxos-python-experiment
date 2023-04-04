@@ -130,8 +130,8 @@ class AcceptorKorni3(object) :
 
 
                 def _sendPrepareResponse():
-                    data = {"id": register, "b": ballot,"resp": mayBeConfirm, "handled": False,
-                            #"aid": self.zU   no need
+                    data = {"id": register, "b": ballot, "resp": mayBeConfirm,
+                            "handled": False, #"aid": self.zU   no need
                             "proposerId": proposerId, "part": self.partitionId}
                     p1 = subprocess.run(['korni3', 'insert', self.korni3container, presptable],
                                    input=json.dumps(data).encode('utf-8'), capture_output=True)
@@ -149,39 +149,41 @@ class AcceptorKorni3(object) :
     def checkAcceptRequestsHandler(self):
         areqtable = 'REQ-ACCEPT-Part-'+self.partitionId
         aresptable = 'RESP-ACCEPT-Part-'+self.partitionId
-        self.cur.execute('select reg, b, v, id, zT, zU '+
-                         'from "' + areqtable + '" where aid=?'+
-                         'and not handled\n'+
-                         '-- TODO zU is valid proposer\n'+
-                         '--order by zT DESC', (self.mePubKey,))
-        reqsformark = list()
-        for record in self.cur.fetchall():
-            register = record[0]
-            b = record[1]
-            v = record[2]
-            id = record[3]
-            zT = record[4]
-            zU = record[5]
-            aa,ab = self.accept(register, b, v)
-            # publish response
-            def _sendAcceptResponse():
-                # TODO handle retcode
-                data={"id": id, # same as in request
-                      "reg": register, "breq": b, "proposerId": zU,
-                      "acceptation": [aa,ab], "handled": False}
-                p = subprocess.run(['korni3', 'insert', self.korni3container, aresptable],
-                                   input=json.dumps(data).encode('utf-8'), capture_output=True)
-            _sendAcceptResponse()
-            # mark as handled
-            reqsformark.append([id,zT])
+        try:
+            self.cur.execute('select reg, b, v, id, zT, zU '+
+                             'from "' + areqtable + '" where aid=?'+
+                             'and not handled\n'+
+                             '-- TODO zU is valid proposer\n'+
+                             '--order by zT DESC', (self.mePubKey,))
+            reqsformark = list()
+            for record in self.cur.fetchall():
+                register = record[0]
+                b = record[1]
+                v = record[2]
+                id = record[3]
+                zT = record[4]
+                zU = record[5]
+                aa,ab = self.accept(register, b, v)
+                # publish response
+                def _sendAcceptResponse():
+                    # TODO handle retcode
+                    data={"id": id, # same as in request
+                          "reg": register, "breq": b, "proposerId": zU,
+                          "acceptation": [aa,ab], "handled": False}
+                    p = subprocess.run(['korni3', 'insert', self.korni3container, aresptable],
+                                       input=json.dumps(data).encode('utf-8'), capture_output=True)
+                _sendAcceptResponse()
+                # mark as handled
+                reqsformark.append([id,zT])
 
-        # mark req as handled
-        for r in reqsformark:
-            self.cur.execute('update "'+areqtable+'" set handled=1 where id=?'+
-                             ' and zT=?',
-                             (r[0], r[1]))
-        self.cur.connection.commit()
-
+            # mark req as handled
+            for r in reqsformark:
+                self.cur.execute('update "'+areqtable+'" set handled=1 where id=?'+
+                                 ' and zT=?',
+                                 (r[0], r[1]))
+            self.cur.connection.commit()
+        except sqlite3.OperationalError:
+            pass
 
 class ProposerKorni3(object):
     """
@@ -234,14 +236,15 @@ class ProposerKorni3(object):
         # REQ-PREPARE-Part-6AB    aid b handled
         # RESP-PREPARE-Part-6AB   b handled proposerId zU
 
-    def receive(self, register: str, fId: str, nextValue):
+    # start handling input request
+    def receive(self, register: str, fId: str, nextValue, reqid):
         """
         receives f change function from client and begins consensus process.
         """
         #  Generate ballot number, B and sends 'prepare' msg with that number to the acceptors.
         ballot_number = self.generate_ballot_number()
         # logger.info("receive. change_func={0}. ballot_number={1}.".format(f, ballot_number))
-        self.send_prepare(register, ballot_number=ballot_number, funcId=fId, nextValue=nextValue)
+        self.send_prepare(register, ballot_number=ballot_number, funcId=fId, nextValue=nextValue, reqid=reqid)
         # now wait confirmation quorum
         # and then prepare 2
 
@@ -259,27 +262,30 @@ class ProposerKorni3(object):
         ballot_number = int(time.time())
         return ballot_number
 
-    def _write(self, register: str, ballot, functionId: str, nextValue, state=0):
-        uid = str(uuid.uuid4()) # always new record
+    def _write(self, register: str, ballot, functionId: str, nextValue, state, reqid):
         data = {"id": json.dumps([register,ballot]),
                 "register": register, "F": self.F, "b": ballot,
-                "fId": functionId, "nextValue": nextValue, "state": state}
+                "fId": functionId, "nextValue": nextValue, "state": state,
+                "reqid": reqid}
         p2 = subprocess.run(['korni3', 'insert', self.korni3container, self.tableName],  # , '--ignore'
                             input=json.dumps(data).encode('utf-8'), capture_output=True)
 
     def _read(self, register: str):
-        """ return (b,fId,next,state, F) """
-        self.cur.execute('select id, F, b, fId, state, nextValue from "'+self.tableName+'" where id=? order by zT DESC limit 1 ',
+        """ return (b,fId,next,state, F, reqid) """
+        self.cur.execute('select id, F, b, fId, state, nextValue, reqid '
+                         'from "'+self.tableName+'" where register=? order by zT DESC limit 1 ',
                          (register,) )
         r = self.cur.fetchone()
-
-        F = r[1]
-        b = r[2]
-        fId = r[3]
-        state = r[4]
-        next = r[5]
-        # return (F, b, fId, state, next)
-        return (b,fId,next,state, F)
+        if not r is None:
+            F = r[1]
+            b = r[2]
+            fId = r[3]
+            state = r[4]
+            next = r[5]
+            reqid = r[6]
+            return (b,fId,next,state, F, reqid)
+        else:
+            raise Exception('can not read proposer state')
     def _readPConfirmations(self, registry, ballot):
         pass
 
@@ -294,12 +300,12 @@ class ProposerKorni3(object):
         p1 = subprocess.run(['korni3', 'insert', self.korni3container, tableName], input=json.dumps(data).encode('utf-8'), capture_output=True)
         return p1.returncode
 
-    def send_prepare(self, register: str, ballot_number, funcId: str, nextValue):
+    def send_prepare(self, register: str, ballot_number, funcId: str, nextValue, reqid):
         for acceptor in self.acceptors:
             # RPC. make request and wait response
             self._sendPrepareRequest(str(acceptor), register, ballot_number)
         # save state and wait resp ...
-        self._write(register, ballot_number, funcId, nextValue)
+        self._write(register, ballot_number, funcId, nextValue, 0, reqid)
 
     def prepare2(self, register, ballot, funcId: str, confirmations): # set state for register
         total_list_of_confirmation_values = []
@@ -309,16 +315,16 @@ class ProposerKorni3(object):
         # If they(confirmations) all contain the empty value,
         # then the proposer defines the current state as PHI otherwise it picks the
         # value of the tuple with the highest ballot number.
-        s_b, s_fId, s_next, s_state, s_F = self._read(register)
+        s_b, s_fId, s_next, _s_state, s_F, s_reqid = self._read(register)
         state = None
         if sum(total_list_of_confirmation_values) == 0:
             state = 00          # default value 00
         else:
             highest_confirmation = self.get_highest_confirmation(confirmations)
             state = highest_confirmation[0]
-        self._write(register, s_b, s_fId, s_next, state)
+        self._write(register, s_b, s_fId, s_next, state, s_reqid)
 
-        self.send_accept(register, funcId, ballot, state, s_next)
+        self.send_accept(register, funcId, ballot, state, s_next, s_reqid)
 
     # clean function, no side effects
     def get_highest_confirmation(self, confirmations):
@@ -340,159 +346,268 @@ class ProposerKorni3(object):
         p = subprocess.run(['korni3', 'insert', self.korni3container, table],
                            input=json.dumps(data).encode('utf-8'))
 
-    def send_accept(self, register, fId, ballot_number, state, nextValue):
+    def send_accept(self, register, fId, ballot_number, state, nextValue, reqid):
         """
         7. Applies the f function to the current state and sends the result, new state, along with the generated ballot number B (an "accept" message) to the acceptors.
         """
 
         # transform state and save it
         f = getFunction(fId)
-        state = f(state, nextValue)
-        self._write(register, ballot_number, fId, nextValue, state)
+        if not f:
+            print('ERROR functio fId change function are not found fid=', fId)
+        else:
+            state = f(state, nextValue)
+            self._write(register, ballot_number, fId, nextValue, state, reqid)
 
-        acceptations = []
-        for acceptor in self.acceptors:
-            #acceptation = acceptor.accept(ballot_number=ballot_number, new_state=self.state)
-            #RPC
-            self._sendAcceptRequest(acceptor, register, ballot_number, state)
+            acceptations = []
+            for acceptor in self.acceptors:
+                #acceptation = acceptor.accept(ballot_number=ballot_number, new_state=self.state)
+                #RPC
+                self._sendAcceptRequest(acceptor, register, ballot_number, state)
 
-        # then wait and then when response quorum , then accept2
+            # then wait and then when response quorum , then accept2
 
-    # TODO call this
-    def accept2(self):
-        # after wait accept confirmations
-        #  to public result
-        data={"id": str(uuid.uuid4()),  "type": 'accept', "aid": acceptor,
-              "reg":register,
-              "b": ballot_number, "v": new_state}
-        p = subprocess.run(['korni3', 'insert', self.korni3container, 'PAXOS-CHANGE-RESULT'],
-                           input=json.dumps(data).encode('utf-8'))
+    def accept2(self, reg, b, breq, F, fId, state, reqid, isConfirm: bool):
+        table = 'PAXOS-RESULT-Part-' + self.partitionId
+        if str(b) == str(breq):
+            data = {"id": reqid, "reg": reg, "breq": breq,
+                    "fId": fId,
+                    "bresult": b, "F": F,  # , "proposerId": self.mePubKey, - zU
+                    "state": state if isConfirm else 'CONFLICT',
+                    "handled": False}
+            # todo ? добавить в ответ все связанные документы с подписями ? или написать отдельный отчет?
+            # todo проверить перед созданием ответа, что он еще не существует. ? --ignore
+            subprocess.run(['korni3', 'insert', self.korni3container, table, '--ignore'],
+                           input=json.dumps(data).encode('utf-8'), capture_output=True)
 
-    def checkPrepareConfirmsHandler(self):
+    def checkPrepareConfirmsHandler_RESP_PREPARE(self):
         reqTable = "REQ-PREPARE-Part-"+self.partitionId
         resTable = "RESP-PREPARE-Part-" + self.partitionId
 
-        def confirms():
-            self.cur.execute("""
-select id as reg,  zT, zU as aid, b , resp
-from \"""" +resTable+ """\"
---group by 
-where 
-	-- for me
-	proposerId=?
-	and b in (select b from (select register, b, max(zT) as zT from StateProposerLocal
-				group by 
-					register, b
-				-- is me write
-				having zU=?
-			))
-	and not handled
-	order by zT desc
-            """, (self.mePubKey, self.mePubKey))
-            confirms = dict()
-            for record in self.cur.fetchall():
-                reg = record[0]
-                b = record[3]
-                if (reg,b) not in confirms:
-                    confirms[(reg,b)] = [record]
-                else:
-                    confirms[(reg, b)].append(record)
-            for reg,bFromConf in confirms:
-                records = confirms[(reg, bFromConf)]
-                b, fId, next, state, F = self._read(reg)
-                if len(records)>F:
-                    # we has достаточно confirms
-                    confirmsList = []
-                    aids = set()
-                    for r in records:
-                        resp = json.loads(r[4])
-                        aid = r[2] # todo check AID
-                        if aid not in aids:
-                            aids.add(aid)
-                            confirmsList.append(resp)
-                    self.prepare2(reg, b, fId, confirmsList)
-                #mark req as handled
-                self.cur.execute('update "'+resTable+'"  set handled=1 where proposerId=? ' +
-                                 'and b=? and id=?  ',
-                                 (self.mePubKey, bFromConf, reg))
-                self.cur.connection.commit()
-        confirms()
+    #     def confirms():
+    #         try:
+    #             self.cur.execute("""
+    # select id as reg,  zT, zU as aid, b , resp
+    # from \"""" +resTable+ """\"
+    # --group by
+    # where
+    #     -- for me
+    #     proposerId=?
+    #     and b in (select b from (select register, b, max(zT) as zT from StateProposerLocal
+    #                 group by
+    #                     register, b
+    #                 -- is me write
+    #                 having zU=?
+    #             ))
+    #     and not handled
+    #     order by zT desc
+    #             """, (self.mePubKey, self.mePubKey))
+    #             confirms = dict()
+    #             for record in self.cur.fetchall():
+    #                 reg = record[0]
+    #                 b = record[3]
+    #                 if (reg,b) not in confirms:
+    #                     confirms[(reg,b)] = [record]
+    #                 else:
+    #                     confirms[(reg, b)].append(record)
+    #             for reg,bFromConf in confirms:
+    #                 records = confirms[(reg, bFromConf)]
+    #                 try:
+    #                     b, fId, next, state, F, reqid = self._read(reg)
+    #                     if len(records)>F:
+    #                         # we has достаточно confirms
+    #                         confirmsList = []
+    #                         aids = set()
+    #                         for r in records:
+    #                             resp = json.loads(r[4])
+    #                             aid = r[2] # todo check AID
+    #                             if aid not in aids:
+    #                                 aids.add(aid)
+    #                                 confirmsList.append(resp)
+    #                         self.prepare2(reg, b, fId, confirmsList)
+    #                     #mark req as handled
+    #                     self.cur.execute('update "'+resTable+'"  set handled=1 where proposerId=? ' +
+    #                                      'and b=? and id=?  ',
+    #                                      (self.mePubKey, bFromConf, reg))
+    #                     self.cur.connection.commit()
+    #                 except Exception:
+    #                     pass
+    #         except sqlite3.OperationalError:
+    #             pass
+    #     #confirms()
+
+        def confirms2():
+            try:
+                self.cur.execute('select id,zT,b,resp,zU from "'+resTable+'" '
+                                 'where not handled and proposerId=?',
+                                 (self.mePubKey, ))
+                confirmations = dict()
+                for record in self.cur.fetchall():
+                    id = record[0]
+                    zT = record[1]
+                    b= record[2]
+
+                    key = (id,b)
+                    if not key in confirmations:
+                        confirmations[key] = [record]
+                    else:
+                        confirmations[key].append(record)
+                for reg, b in confirmations:
+                    records = confirmations[(reg,b)]
+                    try:
+                        s_b, fId, next, state, F, reqid = self._read(reg)
+
+                        confirmsList = []
+                        aids = set()
+                        for r in records:
+                            resp = json.loads(r[3])
+                            aid = r[4]  # todo check AID
+                            if aid not in aids:
+                                aids.add(aid)
+                                confirmsList.append(resp)
+
+                        if len(confirmsList) >= F + 1:
+                            # we has достаточно confirms
+
+                            self.prepare2(reg, b, fId, confirmsList)
+
+                            # mark req as handled
+                            self.cur.execute('update "' + resTable + '"  set handled=1 where proposerId=? ' +
+                                         'and b=? and id=?  ',
+                                         (self.mePubKey, b, reg))
+                        self.cur.connection.commit()
+                    except Exception as e:
+                        print('ERROR proposer not know what hapens here. i get response for what? i have not request for it!', e)
+            except sqlite3.OperationalError:
+                pass
+        confirms2()
 
     def checkAcceptConfirmsHandler(self):
         aresptable='RESP-ACCEPT-Part-'+self.partitionId
-        self.cur.execute('select id, zT, breq, reg, acceptation from "'+aresptable+'" ' +
-                         'where "proposerId"=? 	AND not handled',
-                         (self.mePubKey, ))
-        confirmations = dict()
+        try:
+            self.cur.execute('select id, zT, breq, reg, acceptation from "'+aresptable+'" ' +
+                             'where "proposerId"=? 	AND not handled',
+                             (self.mePubKey, ))
+            confirmations = dict()
+            for record in self.cur.fetchall():
+                id = record[0]
+                reg, b = json.loads(id)
+                zT = record[1]
+                breq = record[2]
+                reg = record[3]
+                acceptation = json.loads(record[4])
+                #
+                info = {"id": id, "zT": zT, "b": b, "breq": breq, "acceptation": acceptation}
+                if (reg,breq) not in confirmations:
+                    confirmations[(reg,breq)] = [info]
+                else:
+                    confirmations[(reg,breq)].append(info)
+            for reg, breq in confirmations:
+                infoList = confirmations[(reg, breq)]
+                b, fId, next, state, F , reqid = self._read(reg)
+                # F - на момент запроса сохранена в базе
+                # но на момент ответа Proposer может быть пересоздан с другим списком acceptors
+                #  считаем что текущий список acceptors согласован и можно бы пересчитать данный F
+                # ПОДУМАТЬ ОБ ЭТОМ!
+
+                if len(infoList) >= F + 1:
+                    # число ответов достаточно чтобы вычислить результат и сообщить о нем
+
+                    def _publishResult(isConfirm: bool):
+                        self.accept2(reg, b, breq, F, fId, state, reqid, isConfirm)
+                    def _makrConfirmsAsHandled():
+                        self.cur.execute('update "' + aresptable + '" set handled=1 where id=?',
+                                         (json.dumps([reg, breq]), ))
+                        self.cur.connection.commit()
+                    # confirm OR conflict ?
+                    countConfirm = 0
+                    countConflict = 0
+                    for i in infoList:
+                        if i["acceptation"][0] != "CONFLICT":
+                            countConfirm = countConfirm + 1
+                        else:
+                            countConflict = countConflict + 1
+                    if countConfirm >= F + 1:
+                        _publishResult(True)
+                        _makrConfirmsAsHandled()
+                    if countConflict >= F + 1:
+                        _publishResult(False)
+                        # если ответ is CONFLICT тоже пометить для удаления
+                        def _conflictRespAsHandled():
+                            for i in infoList:
+                                self.cur.execute('update "' + aresptable + '" set handled=1 where ' +
+                                                 ' id=? and zT=?',
+                                                 (i["id"], i["zT"]))
+                            self.cur.connection.commit()
+                        _conflictRespAsHandled()
+        except sqlite3.OperationalError:
+            pass
+
+    def checkInputRequest(self):
+        table = 'PAXOS-CHANGE-REQ-Part-' + self.partitionId
+        self.cur.execute('select id, zT, reg, fId, next ' 
+                         'from "'+table+'"  where not handled ')
+        fordelete = list()
         for record in self.cur.fetchall():
             id = record[0]
-            reg, b = json.loads(id)
             zT = record[1]
-            breq = record[2]
-            reg = record[3]
-            acceptation = json.loads(record[4])
+            reg = record[2]
+            fId = record[3]
+            next = record[4]
+
+            self.receive(reg,fId,next, id)
+
+            fordelete.append( (id, zT) )
+        #mark req as handled
+        for id, zT in fordelete:
+            self.cur.execute('update "'+table+'" set handled=1 where id=? and zT=?',
+                             (id, zT))
+            self.cur.connection.commit()
+
+
+#################################### CLIENT API
+
+# make REQUEST FOR CHANGE
+def paxosKorni3ClientRequest(key: str, function_id: str, nextValue, korni3container='paxos'):
+    table = 'PAXOS-CHANGE-REQ-Part-'+partitionFromRegKey(key)
+    id = str(uuid.uuid4())
+    data = {"id": id, "reg": key, "fId": function_id, "next": nextValue, "handled": False}
+    p = subprocess.run(['korni3', 'insert', korni3container, table],
+                       input=json.dumps(data).encode('utf-8'))
+    if p.returncode != 0:
+        print('ERROR run korni3 ', p.stderr.read(), p.stdout.read())
+    else:
+        return id
+
+# return function for check values
+def paxosKorni3GetChecker(containerName: str):
+    r = subprocess.run(["korni3", "db", containerName], capture_output=True)
+    path = r.stdout.decode('utf-8').strip()
+    con = sqlite3.connect(path)
+    cur = con.cursor()
+    def paxosKorni3ClientCheckResult(reqid, key):
+        # --
+        partitionId = partitionFromRegKey(key)
+        cur.execute('select state, id, zT from "PAXOS-RESULT-Part-'+partitionId+'" where id=? and reg=?',
+                    (reqid, key) )
+        try:
+            r = cur.fetchone()
+            val = json.loads(r[0]) # 'CONFLICT' - is not value
+            # mark as handled
+            cur.execute('update "PAXOS-RESULT-Part-'+partitionId+'" set handled=1 where id=? and zT=?',
+                        (r[1], r[2]))
+            con.commit()
             #
-            info = {"id": id, "zT": zT, "b": b, "breq": breq, "acceptation": acceptation}
-            if (reg,breq) not in confirmations:
-                confirmations[(reg,breq)] = [info]
-            else:
-                confirmations[(reg,breq)].append(info)
-        for reg, breq in confirmations:
-            infoList = confirmations[(reg, breq)]
-            b, fId, next, state, F = self._read(reg)
-            # F - на момент запроса сохранена в базе
-            # но на момент ответа Proposer может быть пересоздан с другим списком acceptors
-            #  считаем что текущий список acceptors согласован и можно бы пересчитать данный F
-            # ПОДУМАТЬ ОБ ЭТОМ!
-
-            if len(infoList) >= F + 1:
-                # число ответов достаточно чтобы вычислить результат и сообщить о нем
-                def _publishResult(isConfirm: bool):
-                    table = 'PAXOSRESULT-Part-'+self.partitionId
-                    # TODO ид запроса, такой же взять как у запроса, для связи
-                    if str(b) == str(breq):
-                        data = {"id": str(uuid.uuid4()), "reg": reg, "breq": breq,
-                                "fId": fId,
-                                "bresult": b, "F": F,  #, "proposerId": self.mePubKey, - zU
-                                "state": state if isConfirm else 'CONFLICT'}
-                        # todo ? добавить в ответ все связанные документы с подписями ? или написать отдельный отчет?
-                        # todo проверить перед созданием ответа, что он еще не существует. ? --ignore
-                        subprocess.run(['korni3', 'insert', self.korni3container, table, '--ignore'],
-                                            input=json.dumps(data).encode('utf-8'), capture_output=True)
-
-                def _makrConfirmsAsHandled():
-                    self.cur.execute('update "' + aresptable + '" set handled=1 where id=?',
-                                     (json.dumps([reg, breq])))
-                    self.cur.connection.commit()
-                # confirm OR conflict ?
-                countConfirm = 0
-                countConflict = 0
-                for i in infoList:
-                    if i["acceptation"][0] != "CONFLICT":
-                        countConfirm = countConfirm + 1
-                    else:
-                        countConflict = countConflict + 1
-                if countConfirm >= F + 1:
-                    _publishResult(True)
-                    _makrConfirmsAsHandled()
-                if countConflict >= F + 1:
-                    _publishResult(False)
-                    # если ответ is CONFLICT тоже пометить для удаления
-                    def _conflictRespAsHandled():
-                        for i in infoList:
-                            self.cur.execute('update "' + aresptable + '" set handled=1 where ' +
-                                             ' id=? and zT=?',
-                                             (i["id"], i["zT"]))
-                        self.cur.connection.commit()
-                    _conflictRespAsHandled()
-
-
-
+            return val if val!='CONFLICT' else None # TODO ? сделать чтобы значение могло быть CONFLICT
+        except TypeError:
+            return None
+    return paxosKorni3ClientCheckResult
 
 
 if __name__ == '__main__':
     # sure, is container are exists ?
-    subprocess.run(['mkdir', '-p', '~/.config/korni/paxos/'])
+    from pathlib import Path
+    subprocess.run(['mkdir', '-p', str(Path.home())+'/.config/korni/paxos/'])
     mePub = 'MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAvJQG4135BoAhgw+/X+11XOqj2d3BVSX61pLb7EKiPUirzoNo15nP/5ZFrGB00vTfiuGbkP/puBDXMiNnNQNKVHxJ8Ltu/W1Fxo9k5UiFvQ5mmml+ZolkqzKgHaDTM9a9OQ96mc4oelSsX81Nh5+5hsP8RmUHZ8A/pImqr3Ttjmx4BBz+m9fccgvMi2cjG/a79k5/Lv9AYO28MHImHt0whzzHyrKWGeLxEdyPVRrfgbp/crw0lQJsvWZUTkiKFSK8ur0qFvg7szhu+8AOIDcTV9me/uZgOAeEiohn8/KN8rkAlgdFVBmWyyO/KOHR2OK7+PeQDOIxn33xQ0KE9g5aN6lHgRljewsWieP1PNAH6KZCszSykIvdYD5fvniGrOxxJN4HI0CY9q/QWKHYxUzckXtuYuLGiXT5/FAyPdefUGVBt8oB2Nq/kWH4qgu325fdpj0HWYwSPIJWAwQL0/c/XzlJwEjScR+pw/CoMtw1IWDWd5Xx/a8N9hz6FtUiPVNyq8fVjiLwc8cRgo2SrVA2EV4yPRzNcBDGb+r1h5k1dNhc1ATGEJQUWG7zOa4Jj7m0xWoDBIuGFctt6gaIUYZyTHwecIQIjj0nvefW/4reXMGvjBhM+91qqq4zRVI9qWdftJXuE161YZbEWN5xfm3dfCa8udq5m3zEu7HktSlKBD0CAwEAAQ=='
 
     partitionK1 = partitionFromRegKey('k1')
@@ -548,6 +663,10 @@ if __name__ == '__main__':
     def getFunction(id:str):
         if id=='change_func':
             return change_func
+        if id=='read_func':
+            return read_func
+        if id=='set_func':
+            return set_func
 
     acceptorsList = [mePub]
     # TODO create acceptors objects for range of partotions
@@ -557,17 +676,22 @@ if __name__ == '__main__':
                        korni3container='paxos',
                        partitionId=partitionK1,
                        mePubKey=mePub)
-    #print("p._sendPrepareRequest(mePub, 'k1', 10)", p._sendPrepareRequestUsingKorni3(mePub, 'k1', 10))
-    p.receive('k1', 'change_func', 3)
-
+    # req1id = paxosKorni3ClientRequest('k1', 'read_func', None)
+    # print('req1id', req1id)
+    #p.checkInputRequest()
+    # p.receive('k1', 'change_func', 3)
+    # p.receive('k1', 'read_func', None)
+    req1id = paxosKorni3ClientRequest('k1', 'read_func', 'NULL')
+    paxosKorni3ClientCheckResult = paxosKorni3GetChecker('paxos')
 
     ####################### handle requests and confirm and messages founded in files
-    def checkAcceptorsReq(acceptorsObects):
+    def _checkAcceptorsReq(acceptorsObects):
         for a in acceptorsObects:
             a.checkPrepareRequestsHandler()
             a.checkAcceptRequestsHandler()
-    def checkPoposerRequests(proposerObject):
-        proposerObject.checkPrepareConfirmsHandler()
+    def _checkPoposerRequests(proposerObject):
+        proposerObject.checkInputRequest()
+        proposerObject.checkPrepareConfirmsHandler_RESP_PREPARE()
         proposerObject.checkAcceptConfirmsHandler()
 
     # a1 - acceptor.   [a1] - acceptors list
@@ -575,17 +699,16 @@ if __name__ == '__main__':
 
     CHECK_PERIOD = datetime.timedelta(seconds=5) # sec  # TODO make it a env var
     while True:
-        print('NEW LOOP')
         t1 = datetime.datetime.now()
         t2 = t1 + CHECK_PERIOD
         if True:
             # stuff jobs here
-            print('Acceptors req\\res check')
-            checkAcceptorsReq([a1]) # TODO MAKE it a param
-            print('Proposers req\\res check')
-            checkPoposerRequests(p)
+            _checkAcceptorsReq([a1]) # TODO MAKE it a param
+            _checkPoposerRequests(p)
+
+            v = paxosKorni3ClientCheckResult(req1id, 'k1') # TODO REMOVE. is test
+            if not v is None : print('v=', v)
             # jobs end
         pause.until(t2)
 
     #######################
-    exit()

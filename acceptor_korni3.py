@@ -668,4 +668,8 @@ if __name__ == '__main__':
             if not v is None : print('v=', v)
             # jobs end
         pause.until(t2)
+    exit()
     #######################
+
+import os
+os.environ['PAXOSPROPOSERPARTITIONS'])

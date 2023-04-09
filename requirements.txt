@@ -1,9 +1,5 @@
 pylint
-autopep8
 flake8
-subprocess
-sqlite3
-json
-hashlib
+pysqlite3
 #asyncio
 pause

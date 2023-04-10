@@ -13,8 +13,8 @@
 
 
 # Number of failures we can tolerate, F
-# Number of nodes needed to tolerate F, failures is 2F+1
-# eg to tolerate 2failures, we need 5 nodes
+# Number of node needed to tolerate F, failures is 2F+1
+# eg to tolerate 2failures, we need 5 node
 # specifically we are talking about 2F+1 acceptors.
 # NB:: A node can be both an acceptor and a proposer.
 

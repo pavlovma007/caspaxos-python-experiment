@@ -1,6 +1,6 @@
 import subprocess
 import pause, datetime
-from caspaxos_lib import partitionFromRegKey, AcceptorKorni3, ProposerKorni3, CASPaxosClient
+from node.caspaxos_lib import partitionFromRegKey, AcceptorKorni3, ProposerKorni3, CASPaxosClient
 
 #################################### CLIENT API
 
@@ -39,7 +39,7 @@ if __name__ == '__main__':
     # p.receive('k1', 'read_func', None)
     req1id = CASPaxosClient.paxosKorni3ClientRequest('k1', 'read_func', 'NULL')
     req2id = CASPaxosClient.paxosKorni3ClientRequest('k1', 'cas_version_func', {"version": 1, "value": 123} )
-    paxosKorni3ClientCheckResult = CASPaxosClient.paxosKorni3GetChecker('paxos')
+    paxosKorni3ClientCheckResult = CASPaxosClient._paxosKorni3GetChecker('paxos')
 
     ####################### handle requests and confirm and messages founded in files
     def _checkAcceptorsReq(acceptorsObects):

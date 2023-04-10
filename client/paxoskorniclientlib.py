@@ -24,11 +24,11 @@ class CASPaxosClient(object):
         p = subprocess.run(['korni3', 'insert', korni3container, table], input=json.dumps(data).encode('utf-8'))
         if p.returncode != 0:
             print('ERROR run korni3 ', p.stderr.decode('utf-8'), p.stdout.decode('utf-8'))
-            return None,None #,None
+            return None, None
         else:
             future = asyncio.Future()
 
-            paxosKorni3ClientCheckResult = CASPaxosClient.paxosKorni3GetChecker('paxos')
+            paxosKorni3ClientCheckResult = CASPaxosClient._paxosKorni3GetChecker('paxos')
             async def task_check():
                 v = paxosKorni3ClientCheckResult(id, key)
                 if not v is None:
@@ -41,7 +41,7 @@ class CASPaxosClient(object):
 
     # return function for check values
     @staticmethod
-    def paxosKorni3GetChecker(containerName: str):
+    def _paxosKorni3GetChecker(containerName: str):
         r = subprocess.run(["korni3", "db", containerName], stdout=PIPE, stderr=PIPE)
         path = r.stdout.decode('utf-8').strip()
         con = sqlite3.connect(path)

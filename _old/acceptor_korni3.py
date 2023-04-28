@@ -1,13 +1,16 @@
 import subprocess
 import pause, datetime
-from node.caspaxos_lib import partitionFromRegKey, AcceptorKorni3, ProposerKorni3, CASPaxosClient
+
+from node.caspaxos_lib import partitionFromRegKey, AcceptorKorni3, ProposerKorni3
 
 #################################### CLIENT API
 
 
 if __name__ == '__main__':
-    # sure, is container are exists ?
+    from client.paxoskorniclientlib import CASPaxosClient
     from pathlib import Path
+
+    # sure, is container are exists ?
     subprocess.run(['mkdir', '-p', str(Path.home())+'/.config/korni/paxos/'])
     mePub = 'MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAvJQG4135BoAhgw+/X+11XOqj2d3BVSX61pLb7EKiPUirzoNo15nP/5ZFrGB00vTfiuGbkP/puBDXMiNnNQNKVHxJ8Ltu/W1Fxo9k5UiFvQ5mmml+ZolkqzKgHaDTM9a9OQ96mc4oelSsX81Nh5+5hsP8RmUHZ8A/pImqr3Ttjmx4BBz+m9fccgvMi2cjG/a79k5/Lv9AYO28MHImHt0whzzHyrKWGeLxEdyPVRrfgbp/crw0lQJsvWZUTkiKFSK8ur0qFvg7szhu+8AOIDcTV9me/uZgOAeEiohn8/KN8rkAlgdFVBmWyyO/KOHR2OK7+PeQDOIxn33xQ0KE9g5aN6lHgRljewsWieP1PNAH6KZCszSykIvdYD5fvniGrOxxJN4HI0CY9q/QWKHYxUzckXtuYuLGiXT5/FAyPdefUGVBt8oB2Nq/kWH4qgu325fdpj0HWYwSPIJWAwQL0/c/XzlJwEjScR+pw/CoMtw1IWDWd5Xx/a8N9hz6FtUiPVNyq8fVjiLwc8cRgo2SrVA2EV4yPRzNcBDGb+r1h5k1dNhc1ATGEJQUWG7zOa4Jj7m0xWoDBIuGFctt6gaIUYZyTHwecIQIjj0nvefW/4reXMGvjBhM+91qqq4zRVI9qWdftJXuE161YZbEWN5xfm3dfCa8udq5m3zEu7HktSlKBD0CAwEAAQ=='
 
@@ -16,13 +19,6 @@ if __name__ == '__main__':
     partitionK2 = partitionFromRegKey('k2')
 
     a1 = AcceptorKorni3(partition=partitionK1, korni3container='paxos', zU=mePub)
-    # print('a1.prepare 12', a1.prepare('k1', 12))
-    # print('a1.accept(k1,11, 3)', a1.accept('k1',11, 3))
-    # print("a1._read('k1')", a1._read('k1'))
-    # print('a1.prepare 101', a1.prepare('k1', 101))
-    # print("a1._read('k1')", a1._read('k1'))
-    # print('a1.accept(k1,101, 3)', a1.accept('k1',101, 3))
-    # a1.checkPrepareRequestsHandler()
 
     acceptorsList = [mePub]
     # TODO create acceptors objects for range of partitions
@@ -32,11 +28,6 @@ if __name__ == '__main__':
                        korni3container='paxos',
                        partitionId=partitionK1,
                        mePubKey=mePub)
-    # req1id = CASPaxosClient.paxosKorni3ClientRequest('k1', 'read_func', None)
-    # print('req1id', req1id)
-    #p.checkInputRequest()
-    # p.receive('k1', 'cas_version_func', 3)
-    # p.receive('k1', 'read_func', None)
     req1id = CASPaxosClient.paxosKorni3ClientRequest('k1', 'read_func', 'NULL')
     req2id = CASPaxosClient.paxosKorni3ClientRequest('k1', 'cas_version_func', {"version": 1, "value": 123} )
     paxosKorni3ClientCheckResult = CASPaxosClient._paxosKorni3GetChecker('paxos')
@@ -71,5 +62,3 @@ if __name__ == '__main__':
     exit()
     #######################
 
-# import os
-# os.environ['PAXOSPROPOSERPARTITIONS'])

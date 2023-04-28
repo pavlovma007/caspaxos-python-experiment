@@ -1,6 +1,8 @@
 import hashlib, json, sqlite3, subprocess, time
+import os
 from subprocess import PIPE
 from change_functions import getFunction
+from time import sleep
 
 def partitionFromIndex(index: int):
     if index < 0 or index > 4095:
@@ -38,34 +40,36 @@ class AcceptorKorni3(object) :
 
         self.korni3container = korni3container
         r = subprocess.run(["korni3", "db", self.korni3container], stdout=PIPE, stderr=PIPE)
-        path = r.stdout.decode('utf-8').strip()
-        con = sqlite3.connect(path)
-        self.cur = con.cursor()
+        self.path = r.stdout.decode('utf-8').strip()
 
-        def createIndex(name, table, createquery):
-            try:
-                self.cur.execute('SELECT * FROM sqlite_master WHERE type="index" and tbl_name=? and name=? ',
-                                 (table, name))
-                if not self.cur.fetchone():
-                    self.cur.execute(createquery)
-            except sqlite3.OperationalError: pass
-        for partitionId in self.partitions:
-            createIndex("preq-aid-handled-"+partitionId, "REQ-PREPARE-Part-"+partitionId,
-                        'CREATE INDEX "preq-aid-handled-'+partitionId+
-                        '" ON "REQ-PREPARE-Part-'+partitionId+'" ( 	"aid", 	"handled" );')
+        try:
+            cur, con = self.cur()
+            def createIndex(name, table, createquery):
+                try:
+                    cur.execute('SELECT * FROM sqlite_master WHERE type="index" and tbl_name=? and name=? ',
+                                     (table, name))
+                    if not cur.fetchone():
+                        cur.execute(createquery)
+                except sqlite3.OperationalError: pass
+            for partitionId in self.partitions:
+                createIndex("preq-aid-handled-"+partitionId, "REQ-PREPARE-Part-"+partitionId,
+                            'CREATE INDEX "preq-aid-handled-'+partitionId+
+                            '" ON "REQ-PREPARE-Part-'+partitionId+'" ( 	"aid", 	"handled" );')
 
-            createIndex("preq-handled-id-zT-"+partitionId , "REQ-PREPARE-Part-"+partitionId,
-                        'CREATE INDEX "preq-handled-id-zT-'+partitionId+'" ON "REQ-PREPARE-Part-'
-                        +partitionId+'" ( 	"handled", 	"id", 	"zT" );')
+                createIndex("preq-handled-id-zT-"+partitionId , "REQ-PREPARE-Part-"+partitionId,
+                            'CREATE INDEX "preq-handled-id-zT-'+partitionId+'" ON "REQ-PREPARE-Part-'
+                            +partitionId+'" ( 	"handled", 	"id", 	"zT" );')
 
-            createIndex("areq-aid-handled-"+partitionId, "REQ-ACCEPT-Part-"+partitionId,
-                        'CREATE INDEX "areq-aid-handled-'+partitionId+
-                        '" ON "REQ-ACCEPT-Part-'+partitionId+'" (	"aid",	"handled");')
+                createIndex("areq-aid-handled-"+partitionId, "REQ-ACCEPT-Part-"+partitionId,
+                            'CREATE INDEX "areq-aid-handled-'+partitionId+
+                            '" ON "REQ-ACCEPT-Part-'+partitionId+'" (	"aid",	"handled");')
 
-            createIndex("areq-handled-aid-zT-"+partitionId, "REQ-ACCEPT-Part-"+partitionId,
-                        'CREATE INDEX "areq-handled-aid-zT-'+partitionId+
-                        '" ON "REQ-ACCEPT-Part-'+partitionId+'" (	"handled", 	"aid", 	"zT" );')
-        self.cur.connection.commit()
+                createIndex("areq-handled-aid-zT-"+partitionId, "REQ-ACCEPT-Part-"+partitionId,
+                            'CREATE INDEX "areq-handled-aid-zT-'+partitionId+
+                            '" ON "REQ-ACCEPT-Part-'+partitionId+'" (	"handled", 	"aid", 	"zT" );')
+            cur.connection.commit()
+        finally:
+            con.close()
 
 
     def _write(self, register: str, promise, accepted): # return void
@@ -73,27 +77,48 @@ class AcceptorKorni3(object) :
 
         data = {"id": register, "promise": promise, "accepted": accepted}
         # , '--ignore'
-        p1 = subprocess.run(['korni3', 'insert', self.korni3container, self.tableName(partitionFromRegKey(register))],
-                            input=json.dumps(data).encode('utf-8'), stdout=PIPE, stderr=PIPE)
-        if p1.returncode != 0:
-            print('ERROR korni3 acceptor _write', p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
+
+        def working(i):
+            p1 = subprocess.run(
+                ['korni3', 'insert', self.korni3container, self.tableName(partitionFromRegKey(register))],
+                input=json.dumps(data).encode('utf-8'), stdout=PIPE, stderr=PIPE)
+            if p1.returncode == 1:
+                print('ERROR korni3 acceptor _write', p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
+            return p1.returncode
+        ret = 100
+        for i in range(0, 10):
+            if ret == 100 :
+                ret = working(i)
+            if ret == 100:
+                sleep(3)
+                print('need repeat - db locked ....')
+                ret = working(i)
+
+    def cur(self): # can be None
+        con = sqlite3.connect(self.path, timeout=5)
+        return con.cursor() , con
 
     def _read(self, registerKey: str) :  # return tuple ( promise, accepted: (0,0) )
-        if not self._validate(registerKey): return None
-        defaultVal = (0, (0,0))
         try:
-            self.cur.execute('select promise, accepted from "' + self.tableName(partitionFromRegKey(registerKey))
-                             +'"  where id=? and zU=?   ORDER by zT DESC limit 1',  (registerKey, self.mePubKey))
-            result = self.cur.fetchone()
-            if result is not  None:
-                return result[0], json.loads(result[1])
-            else:
+            cur, con = self.cur()
+            if not self._validate(registerKey): return None
+            defaultVal = (0, (0,0))
+            try:
+                cur.execute('select promise, accepted from "' + self.tableName(partitionFromRegKey(registerKey))
+                            +'"  where id=? and zU=?   ORDER by zT DESC limit 1',  (registerKey, self.mePubKey))
+                result = cur.fetchone()
+
+                if result is not  None:
+                    return result[0], json.loads(result[1])
+                else:
+                    return defaultVal
+            except sqlite3.OperationalError as e:
+                print('ERROR AcceptorKorni3 _read sqlite3.OperationalError', e)
                 return defaultVal
-        except sqlite3.OperationalError as e:
-            print('ERROR AcceptorKorni3 _read sqlite3.OperationalError', e)
-            return defaultVal
-            #TODO
-            #     sqlite3.OperationalError: no  such  table: PaxosAcceptor - 6AB
+                #TODO
+                #     sqlite3.OperationalError: no  such  table: PaxosAcceptor - 6AB
+        finally:
+            con.close()
 
     def _validate(self, register):
         # validate
@@ -134,80 +159,114 @@ class AcceptorKorni3(object) :
 
     # handler are periodicaly called for check new req data
     def checkPrepareRequestsHandler(self):
-        # TODO perf. add cond this and prev day by zT ?
-        for partition in self.partitions:
-            try:
-                self.cur.execute('select b,id, zT, zU from "' + self.preqtable(partition) +'" where aid=? and not handled',
-                                 (self.mePubKey,))
-                for record in self.cur.fetchall():
-                    ballot = record[0]
-                    register = record[1]
-                    zT = record[2]
-                    proposerId = record[3]
+        try:
+            cur, con = self.cur()
+            # TODO perf. add cond this and prev day by zT ?
+            for partition in self.partitions:
+                try:
+                    cur.execute('select b,id, zT, zU from "' + self.preqtable(partition) +'" where aid=? and not handled',
+                                     (self.mePubKey,))
+                    for record in cur.fetchall():
+                        ballot = record[0]
+                        register = record[1]
+                        zT = record[2]
+                        proposerId = record[3]
 
-                    mayBeConfirm = self.prepare(register, ballot)
+                        mayBeConfirm = self.prepare(register, ballot)
 
-                    def _sendPrepareResponse():
-                        data = {"id": register, "b": ballot, "resp": mayBeConfirm,
-                                "handled": False, #"aid": self.zU   no need
-                                "proposerId": proposerId, "part": partition}
-                        p1 = subprocess.run(['korni3', 'insert', self.korni3container, self.presptable(partition)], input=json.dumps(data).encode('utf-8'),
-                                            stdout=PIPE, stderr=PIPE)
-                        if p1.returncode > 0:
-                            print('ERROR Acceptor checkPrepareRequestsHandler ', p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
-                    if mayBeConfirm is not None:
-                        _sendPrepareResponse()
+                        def _sendPrepareResponse():
+                            data = {"id": register, "b": ballot, "resp": mayBeConfirm,
+                                    "handled": False, #"aid": self.zU   no need
+                                    "proposerId": proposerId, "part": partition}
+                            # repeat
+                            def working(i):
+                                p1 = subprocess.run(['korni3', 'insert', self.korni3container, self.presptable(partition)], input=json.dumps(data).encode('utf-8'),
+                                                    stdout=PIPE, stderr=PIPE)
+                                if p1.returncode == 1:
+                                    print('ERROR Acceptor checkPrepareRequestsHandler ', p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
+                                return p1.returncode
+                            ret = 100
+                            for i in range(0, 10):
+                                if ret == 100:
+                                    ret = working(i)
+                                if ret == 100:
+                                    sleep(3)
+                                    print('need repeat - db locked ....')
+                                    ret = working(i)
 
-                    # mark it handled for not handle again # its small hack but is normaly
-                    self.cur.execute('update "'+self.preqtable(partition)+'" set handled = true where id=? and zT = ?', (register, zT))
-                    self.cur.connection.commit()
-            except sqlite3.OperationalError as e:
-                pass
-                # print('ERROR ', e)
+                        if mayBeConfirm is not None:
+                            _sendPrepareResponse()
+
+                        # mark it handled for not handle again # its small hack but is normaly
+                        cur.execute('update "'+self.preqtable(partition)+'" set handled = true where id=? and zT = ?', (register, zT))
+                        cur.connection.commit()
+                except sqlite3.OperationalError as e:
+                    pass
+                    # print('ERROR ', e)
+        finally:
+            con.close()
 
     # periodycaly called for check Accept REQ for me
     def checkAcceptRequestsHandler(self):
-        for partition in self.partitions:
-            try:
-                self.cur.execute('select reg, b, v, id, zT, zU '+
-                                 'from "' + self.areqtable(partition) + '" where aid=?'+
-                                 'and not handled\n'+
-                                 '-- TODO zU is valid proposer\n'+
-                                 '--order by zT DESC', (self.mePubKey,))
-                reqsformark = list()
-                for record in self.cur.fetchall():
-                    register = record[0]
-                    b = record[1]
-                    v = record[2]
-                    id = record[3]
-                    zT = record[4]
-                    zU = record[5]
-                    aa,ab = self.accept(register, b, v)
-                    # publish response
-                    def _sendAcceptResponse():
-                        # TODO handle retcode
-                        data={"id": id, # same as in request
-                              "reg": register, "breq": b, "proposerId": zU,
-                              "acceptation": [aa,ab], "handled": False}
-                        p1 = subprocess.run(['korni3', 'insert', self.korni3container, self.aresptable(partition)],
-                                           input=json.dumps(data).encode('utf-8'),
-                                           stdout=PIPE, stderr=PIPE)
-                        if p1.returncode != 0:
-                            print('ERROR korni3 acceptor send accept resp', p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
-                    _sendAcceptResponse()
-                    # mark as handled
-                    reqsformark.append([id,zT])
+        try:
+            cur, con = self.cur()
+            for partition in self.partitions:
+                try:
+                    cur.execute('select reg, b, v, id, zT, zU '+
+                                     'from "' + self.areqtable(partition) + '" where aid=?'+
+                                     'and not handled\n'+
+                                     '-- TODO zU is valid proposer\n'+
+                                     '--order by zT DESC', (self.mePubKey,))
+                    reqsformark = list()
+                    for record in cur.fetchall():
+                        register = record[0]
+                        b = record[1]
+                        v = record[2]
+                        id = record[3]
+                        zT = record[4]
+                        zU = record[5]
+                        aa,ab = self.accept(register, b, v)
+                        # publish response
+                        def _sendAcceptResponse():
+                            # TODO handle retcode
+                            data={"id": id, # same as in request
+                                  "reg": register, "breq": b, "proposerId": zU,
+                                  "acceptation": [aa,ab], "handled": False}
 
-                # mark req as handled
-                for r in reqsformark:
-                    self.cur.execute('update "' + self.areqtable(partition) + '" set handled=1 where id=?'+
-                                     ' and zT=?',
-                                     (r[0], r[1]))
-                self.cur.connection.commit()
-            except sqlite3.OperationalError:
-                pass
+                            def working(i):
+                                p1 = subprocess.run(['korni3', 'insert', self.korni3container, self.aresptable(partition)],
+                                                   input=json.dumps(data).encode('utf-8'),
+                                                   stdout=PIPE, stderr=PIPE)
+                                if p1.returncode == 1:
+                                    print('ERROR korni3 acceptor send accept resp', p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
+                                return p1.returncode
+                            ret = 100
+                            for i in range(0, 10):
+                                if ret == 100:
+                                    ret = working(i)
+                                if ret == 100:
+                                    sleep(3)
+                                    print('need repeat - db locked ....')
+                                    ret = working(i)
+
+
+                        _sendAcceptResponse()
+                        # mark as handled
+                        reqsformark.append([id,zT])
+
+                    # mark req as handled
+                    for r in reqsformark:
+                        cur.execute('update "' + self.areqtable(partition) + '" set handled=1 where id=?'+
+                                         ' and zT=?',
+                                         (r[0], r[1]))
+                    cur.connection.commit()
+                except sqlite3.OperationalError:
+                    pass
+        finally:
+            con.close()
 
 class ProposerKorni3(object):
+
     """
     2. The proposer generates a ballot number, B, and sends "prepare" messages containing that number
     to the acceptors.
@@ -233,34 +292,42 @@ class ProposerKorni3(object):
         p1 = subprocess.run(["korni3", "db", self.korni3container], stdout=PIPE, stderr=PIPE)
         if p1.returncode != 0:
             print('ERROR korni3 get path to container', p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
-        path = p1.stdout.decode('utf-8').strip()
-        con = sqlite3.connect(path)
-        self.cur = con.cursor()
+            os.exit(1)
+        self.path = p1.stdout.decode('utf-8').strip()
 
-        # shure indexes
-        def createIndex(name, table, createquery):
-            try:
-                self.cur.execute('SELECT * FROM sqlite_master WHERE type="index" and tbl_name=? and name=? ',
-                                 (table, name))
-                if not self.cur.fetchone():
-                    self.cur.execute(createquery)
-            except sqlite3.OperationalError: pass
-        for partition in self.partitions:
-            createIndex("proposer-register", "StateProposerLocal", 'CREATE INDEX "proposer-register" ON "StateProposerLocal" ( 	"register" );')
-            createIndex("presp-proposerid-handled-" + partition, "RESP-PREPARE-Part-" + partition,
-                        'CREATE INDEX "presp-proposerid-handled-' + partition + '" ON "RESP-PREPARE-Part-' + partition + '" ( 	"proposerId", 	"handled" );')
-            createIndex("presp-handled-proposer-b-id-" + partition, "RESP-PREPARE-Part-" + partition,
-                        'CREATE INDEX "presp-handled-proposer-b-id-' + partition + '" ON "RESP-PREPARE-Part-' + partition + '" ( 	"handled", 	"proposerId", 	"b", 	"id" );')
-            createIndex("aresp-proposerid-handled-" + partition, "RESP-ACCEPT-Part-" + partition,
-                        'CREATE INDEX "aresp-proposerid-handled-' + partition + '" ON "RESP-ACCEPT-Part-' + partition + '" ( 	"proposerId", 	"handled" );')
-            createIndex("aresp-handled-id-" + partition, "RESP-ACCEPT-Part-" + partition,
-                        'CREATE INDEX "aresp-handled-id-' + partition + '" ON "RESP-ACCEPT-Part-' + partition + '" ( 	"handled", 	"id" );')
-            createIndex("aresp-id-zT-" + partition, "RESP-ACCEPT-Part-" + partition,
-                        'CREATE INDEX "aresp-id-zT-' + partition + '" ON "RESP-ACCEPT-Part-' + partition + '" ( 	"id", 	"zT" );')
-            createIndex("inreq-handled-" + partition, "PAXOS-CHANGE-REQ-Part-" + partition,
-                        'CREATE INDEX "inreq-handled-' + partition + '" ON "PAXOS-CHANGE-REQ-Part-' + partition + '" ( 	"handled" );')
-            createIndex("inreq-id-zT-" + partition, "PAXOS-CHANGE-REQ-Part-" + partition,
-                        'CREATE INDEX "inreq-id-zT-' + partition + '" ON "PAXOS-CHANGE-REQ-Part-' + partition + '" ( "id", 	"zT" );')
+        try:
+            cur, con = self.cur()
+            # shure indexes
+            def createIndex(name, table, createquery):
+                try:
+                    cur.execute('SELECT * FROM sqlite_master WHERE type="index" and tbl_name=? and name=? ',
+                                     (table, name))
+                    if not cur.fetchone():
+                        cur.execute(createquery)
+                except sqlite3.OperationalError: pass
+            for partition in self.partitions:
+                createIndex("proposer-register", "StateProposerLocal", 'CREATE INDEX "proposer-register" ON "StateProposerLocal" ( 	"register" );')
+                createIndex("presp-proposerid-handled-" + partition, "RESP-PREPARE-Part-" + partition,
+                            'CREATE INDEX "presp-proposerid-handled-' + partition + '" ON "RESP-PREPARE-Part-' + partition + '" ( 	"proposerId", 	"handled" );')
+                createIndex("presp-handled-proposer-b-id-" + partition, "RESP-PREPARE-Part-" + partition,
+                            'CREATE INDEX "presp-handled-proposer-b-id-' + partition + '" ON "RESP-PREPARE-Part-' + partition + '" ( 	"handled", 	"proposerId", 	"b", 	"id" );')
+                createIndex("aresp-proposerid-handled-" + partition, "RESP-ACCEPT-Part-" + partition,
+                            'CREATE INDEX "aresp-proposerid-handled-' + partition + '" ON "RESP-ACCEPT-Part-' + partition + '" ( 	"proposerId", 	"handled" );')
+                createIndex("aresp-handled-id-" + partition, "RESP-ACCEPT-Part-" + partition,
+                            'CREATE INDEX "aresp-handled-id-' + partition + '" ON "RESP-ACCEPT-Part-' + partition + '" ( 	"handled", 	"id" );')
+                createIndex("aresp-id-zT-" + partition, "RESP-ACCEPT-Part-" + partition,
+                            'CREATE INDEX "aresp-id-zT-' + partition + '" ON "RESP-ACCEPT-Part-' + partition + '" ( 	"id", 	"zT" );')
+                createIndex("inreq-handled-" + partition, "PAXOS-CHANGE-REQ-Part-" + partition,
+                            'CREATE INDEX "inreq-handled-' + partition + '" ON "PAXOS-CHANGE-REQ-Part-' + partition + '" ( 	"handled" );')
+                createIndex("inreq-id-zT-" + partition, "PAXOS-CHANGE-REQ-Part-" + partition,
+                            'CREATE INDEX "inreq-id-zT-' + partition + '" ON "PAXOS-CHANGE-REQ-Part-' + partition + '" ( "id", 	"zT" );')
+        finally:
+            con.close()
+
+    def cur(self):  # can be None
+        con = sqlite3.connect(self.path, timeout=5)
+        cur = con.cursor()
+        return cur, con
 
     def inreqtable(self, partitionId):
         return 'PAXOS-CHANGE-REQ-Part-' + partitionId
@@ -321,46 +388,70 @@ class ProposerKorni3(object):
                 "register": register, "F": self.F(partitionFromRegKey(register)), "b": ballot,
                 "fId": functionId, "nextValue": nextValue, "state": state,
                 "reqid": reqid}
-        # , '--ignore'
-        p1 = subprocess.run(['korni3', 'insert', self.korni3container, self.tableName],
-                            input=json.dumps(data).encode('utf-8'),
-                            stdout=PIPE, stderr=PIPE)
-        if p1.returncode != 0:
-            print('ERROR korni3 proposer write', p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
-            # raise Exception(p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
 
+        def working(i):
+            # , '--ignore'
+            p1 = subprocess.run(['korni3', 'insert', self.korni3container, self.tableName],
+                                input=json.dumps(data).encode('utf-8'),
+                                stdout=PIPE, stderr=PIPE)
+            if p1.returncode != 0:
+                print('ERROR korni3 proposer write', p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
+                # raise Exception(p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
+            return p1.returncode
+        ret = 100
+        for i in range(0, 10):
+            if ret == 100:
+                ret = working(i)
+            if ret == 100:
+                sleep(3)
+                print('need repeat - db locked ....')
+                ret = working(i)
 
     def _read(self, register: str):
         """ return (b,fId,next,state, F, reqid) """
-        self.cur.execute('select id, F, b, fId, state, nextValue, reqid '
-                         'from "'+self.tableName+'" where register=? order by zT DESC limit 1 ',
-                         (register,) )
-        r = self.cur.fetchone()
-        if not r is None:
-            F = r[1]
-            b = r[2]
-            fId = r[3]
-            state = r[4]
-            next = r[5] #scalar
-            try:
-                next = json.loads(next)
-            except Exception: pass
-            reqid = r[6]
-            return (b,fId,next,state, F, reqid)
-        else:
-            return (0,'','',0, self.F(partitionFromRegKey(register)), 'NULL')
-            # raise Exception('can not read proposer state')
-
+        try:
+            cur, con = self.cur()
+            cur.execute('select id, F, b, fId, state, nextValue, reqid '
+                             'from "'+self.tableName+'" where register=? order by zT DESC limit 1 ',
+                             (register,) )
+            r = cur.fetchone()
+            if not r is None:
+                F = r[1]
+                b = r[2]
+                fId = r[3]
+                state = r[4]
+                next = r[5] #scalar
+                try:
+                    next = json.loads(next)
+                except Exception: pass
+                reqid = r[6]
+                return (b,fId,next,state, F, reqid)
+            else:
+                return (0,'','',0, self.F(partitionFromRegKey(register)), 'NULL')
+                # raise Exception('can not read proposer state')
+        finally:
+            con.close()
 
     def _sendPrepareRequest(self, acceptorPub: str, register: str, ballot):
         data = {"id": register, "type": 'prepare', "aid": acceptorPub, "b": ballot,
                 "handled": False }
-        p1 = subprocess.run(['korni3', 'insert', self.korni3container, self.preqtable(partitionFromRegKey(register))],
-                            input=json.dumps(data).encode('utf-8'),
-                            stdout=PIPE, stderr=PIPE)
-        if p1.returncode != 0:
-            print('ERROR korni3 prep req', p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
-        return p1.returncode
+
+        def working(i):
+            p1 = subprocess.run(['korni3', 'insert', self.korni3container, self.preqtable(partitionFromRegKey(register))],
+                                input=json.dumps(data).encode('utf-8'),
+                                stdout=PIPE, stderr=PIPE)
+            if p1.returncode != 0:
+                print('ERROR korni3 prep req', p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
+            return p1.returncode
+        ret = 100
+        for i in range(0, 10):
+            if ret == 100:
+                ret = working(i)
+            if ret == 100:
+                sleep(3)
+                print('need repeat - db locked ....')
+                ret = working(i)
+        return ret
 
 
     def send_prepare(self, register: str, ballot_number, funcId: str, nextValue, reqid):
@@ -393,10 +484,22 @@ class ProposerKorni3(object):
         data={"id": json.dumps([register, ballot_number]),  "type": 'accept', "aid": acceptor,
               "reg":register,
               "b": ballot_number, "v": new_state, "handled": 0}
-        p1 = subprocess.run(['korni3', 'insert', self.korni3container, self.areqtable(partitionFromRegKey(register))],
-                           input=json.dumps(data).encode('utf-8'))
-        if p1.returncode != 0:
-            print('ERROR korni3 proposer send accept req', p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
+
+        def working(i):
+            p1 = subprocess.run(['korni3', 'insert', self.korni3container, self.areqtable(partitionFromRegKey(register))],
+                               input=json.dumps(data).encode('utf-8'))
+            if p1.returncode != 0:
+                print('ERROR korni3 proposer send accept req', p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
+            return p1.returncode
+        ret = 100
+        for i in range(0, 10):
+            if ret == 100:
+                ret = working(i)
+            if ret == 100:
+                sleep(3)
+                print('need repeat - db locked ....')
+                ret = working(i)
+        return ret
 
 
     def send_accept(self, register, fId, ballot_number, state, nextValue, reqid):
@@ -423,149 +526,168 @@ class ProposerKorni3(object):
                     "result": 'CONFIRM' if isConfirm else 'CONFLICT',
                     "state": state,
                     "handled": False}
-            # todo ? добавить в ответ все связанные документы с подписями ? или написать отдельный отчет?
-            # todo проверить перед созданием ответа, что он еще не существует. ? --ignore
-            p1 = subprocess.run(['korni3', 'insert', self.korni3container, self.outtable(partitionFromRegKey(reg)),
-                            '--ignore'], input=json.dumps(data).encode('utf-8'), stdout=PIPE, stderr=PIPE)
-            if p1.returncode != 0:
-                print('ERROR korni3 proposer accept2 ', p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
-
+            def working(i):
+                # todo ? добавить в ответ все связанные документы с подписями ? или написать отдельный отчет?
+                # todo проверить перед созданием ответа, что он еще не существует. ? --ignore
+                p1 = subprocess.run(['korni3', 'insert', self.korni3container, self.outtable(partitionFromRegKey(reg)),
+                                '--ignore'], input=json.dumps(data).encode('utf-8'), stdout=PIPE, stderr=PIPE)
+                if p1.returncode != 0:
+                    print('ERROR korni3 proposer accept2 ', p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
+                return p1.returncode
+            ret = 100
+            for i in range(0, 10):
+                if ret == 100:
+                    ret = working(i)
+                if ret == 100:
+                    sleep(3)
+                    print('need repeat - db locked ....')
+                    ret = working(i)
 
     def checkInputRequest(self):
-        for partition in self.partitions:
-            try:
-                # TODO брать только то, что запросы мне непосредственно, а то все пропозеры партиции схватятзя за запрос
-                self.cur.execute('select id, zT, reg, fId, next ' 
-                                 'from "' + self.inreqtable(partition) + '"  where not handled ')
-                fordelete = list()
-                for record in self.cur.fetchall():
-                    id = record[0]
-                    zT = record[1]
-                    reg = record[2]
-                    fId = record[3]
-                    next = record[4]
+        try:
+            cur, con = self.cur()
+            for partition in self.partitions:
+                try:
+                    # TODO брать только то, что запросы мне непосредственно, а то все пропозеры партиции схватятзя за запрос
+                    cur.execute('select id, zT, reg, fId, next ' 
+                                     'from "' + self.inreqtable(partition) + '"  where not handled ')
+                    fordelete = list()
+                    for record in cur.fetchall():
+                        id = record[0]
+                        zT = record[1]
+                        reg = record[2]
+                        fId = record[3]
+                        next = record[4]
 
-                    s_b,s_fId,s_next,s_state, s_F, s_reqid = self._read(reg)
-                    if s_reqid != 'NULL' :
-                        continue  # skip request . because now we already working
+                        s_b,s_fId,s_next,s_state, s_F, s_reqid = self._read(reg)
+                        if s_reqid != 'NULL' :
+                            continue  # skip request . because now we already working
 
-                    # start challenge
-                    self.receive(reg, fId, next, id)
+                        # start challenge
+                        self.receive(reg, fId, next, id)
 
-                    fordelete.append( (id, zT) )
-                # mark req as handled
-                for id, zT in fordelete:
-                    self.cur.execute('update "' + self.inreqtable(partition) + '" set handled=1 where id=? and zT=?',
-                                     (id, zT))
-                    self.cur.connection.commit()
-            except sqlite3.OperationalError:
-                pass
+                        fordelete.append( (id, zT) )
+                    # mark req as handled
+                    for id, zT in fordelete:
+                        cur.execute('update "' + self.inreqtable(partition) + '" set handled=1 where id=? and zT=?',
+                                         (id, zT))
+                        cur.connection.commit()
+                except sqlite3.OperationalError:
+                    pass
+        finally:
+            con.close()
 
 
     def checkPrepareConfirmsHandler_RESP_PREPARE(self):
-        for partition in self.partitions:
-            def confirms2():
-                try:
-                    self.cur.execute('select id,zT,b,resp,zU from "' + self.presptable(partition) + '" '
-                                     'where not handled and proposerId=?',
-                                     (self.mePubKey, ))
-                    confirmations = dict()
-                    for record in self.cur.fetchall():
-                        id = record[0]
-                        b= record[2]
-                        key = (id,b)
-                        if not key in confirmations:
-                            confirmations[key] = [record]
-                        else:
-                            confirmations[key].append(record)
-                    for reg, b in confirmations:
-                        records = confirmations[(reg,b)]
-                        try:
-                            s_b, fId, next, state, F, reqid = self._read(reg)
-                            confirmsList = []
-                            aids = set()
-                            for r in records:
-                                resp = json.loads(r[3]) if r[3]!='NULL' else 0
-                                aid = r[4]  # todo check AID
-                                if aid not in aids:
-                                    aids.add(aid)
-                                    confirmsList.append(resp)
-                            if len(confirmsList) >= F + 1:
-                                # we has достаточно confirms
-                                self.prepare2(reg, b, fId, confirmsList)
+        try:
+            cur, con = self.cur()
+            for partition in self.partitions:
+                def confirms2():
+                    try:
+                        cur.execute('select id,zT,b,resp,zU from "' + self.presptable(partition) + '" '
+                                         'where not handled and proposerId=?',
+                                         (self.mePubKey, ))
+                        confirmations = dict()
+                        for record in cur.fetchall():
+                            id = record[0]
+                            b= record[2]
+                            key = (id,b)
+                            if not key in confirmations:
+                                confirmations[key] = [record]
+                            else:
+                                confirmations[key].append(record)
+                        for reg, b in confirmations:
+                            records = confirmations[(reg,b)]
+                            try:
+                                s_b, fId, next, state, F, reqid = self._read(reg)
+                                confirmsList = []
+                                aids = set()
+                                for r in records:
+                                    resp = json.loads(r[3]) if r[3]!='NULL' else 0
+                                    aid = r[4]  # todo check AID
+                                    if aid not in aids:
+                                        aids.add(aid)
+                                        confirmsList.append(resp)
+                                if len(confirmsList) >= F + 1:
+                                    # we has достаточно confirms
+                                    self.prepare2(reg, b, fId, confirmsList)
 
-                                # mark req as handled
-                                self.cur.execute('update "' + self.presptable(partition) +
-                                                 '"  set handled=1 where proposerId=? ' + 'and b=? and id=?  ',
-                                             (self.mePubKey, b, reg))
-                                self.cur.connection.commit()
-                        except Exception as e:
-                            print('ERROR proposer not know what hapens here. i get response for what? i have not request for it!', e)
-                except sqlite3.OperationalError:
-                    pass
-            confirms2()
-
+                                    # mark req as handled
+                                    cur.execute('update "' + self.presptable(partition) +
+                                                     '"  set handled=1 where proposerId=? ' + 'and b=? and id=?  ',
+                                                 (self.mePubKey, b, reg))
+                                    cur.connection.commit()
+                            except Exception as e:
+                                print('ERROR proposer not know what hapens here. i get response for what? i have not request for it!', e)
+                    except sqlite3.OperationalError:
+                        pass
+                confirms2()
+        finally:
+            con.close()
 
     def checkAcceptConfirmsHandler(self):
-        for partition in self.partitions:
-            try:
-                self.cur.execute('select id, zT, breq, reg, acceptation from "' + self.aresptable(partition) + '" ' +
-                                 'where "proposerId"=? 	AND not handled', (self.mePubKey, ))
-                confirmations = dict()
-                for record in self.cur.fetchall():
-                    id = record[0]
-                    reg, b = json.loads(id)
-                    zT = record[1]
-                    breq = record[2]
-                    reg = record[3]
-                    acceptation = json.loads(record[4])
-                    #
-                    info = {"id": id, "zT": zT, "b": b, "breq": breq, "acceptation": acceptation}
-                    if (reg,breq) not in confirmations:
-                        confirmations[(reg,breq)] = [info]
-                    else:
-                        confirmations[(reg,breq)].append(info)
-                for reg, breq in confirmations:
-                    infoList = confirmations[(reg, breq)]
-                    b, fId, next, state, F , reqid = self._read(reg)
-                    # F - на момент запроса сохранена в базе
-                    # но на момент ответа Proposer может быть пересоздан с другим списком acceptors
-                    #  считаем что текущий список acceptors согласован и можно бы пересчитать данный F
-                    # ПОДУМАТЬ ОБ ЭТОМ!
-                    if len(infoList) >= F + 1:
-                        # число ответов достаточно чтобы вычислить результат и сообщить о нем
-                        def _publishResult(isConfirm: bool):
-                            self.accept2(reg, b, breq, F, fId, state, reqid, isConfirm)
-                        def _makrConfirmsAsHandled():
-                            self.cur.execute('update "' + self.aresptable(partition) + '" set handled=1 where id=?',
-                                             (json.dumps([reg, breq]), ))
-                            self.cur.connection.commit()
-                            self._write(reg,b,None,None, None, None)
-                            # now proposer can work with reg again in other req
-                        # confirm OR conflict ?
-                        countConfirm = 0
-                        countConflict = 0
-                        for i in infoList:
-                            if i["acceptation"][0] != "CONFLICT":
-                                countConfirm = countConfirm + 1
-                            else:
-                                countConflict = countConflict + 1
+        try:
+            cur, con = self.cur()
+            for partition in self.partitions:
+                try:
+                    cur.execute('select id, zT, breq, reg, acceptation from "' + self.aresptable(partition) + '" ' +
+                                     'where "proposerId"=? 	AND not handled', (self.mePubKey, ))
+                    confirmations = dict()
+                    for record in cur.fetchall():
+                        id = record[0]
+                        reg, b = json.loads(id)
+                        zT = record[1]
+                        breq = record[2]
+                        reg = record[3]
+                        acceptation = json.loads(record[4])
+                        #
+                        info = {"id": id, "zT": zT, "b": b, "breq": breq, "acceptation": acceptation}
+                        if (reg,breq) not in confirmations:
+                            confirmations[(reg,breq)] = [info]
+                        else:
+                            confirmations[(reg,breq)].append(info)
+                    for reg, breq in confirmations:
+                        infoList = confirmations[(reg, breq)]
+                        b, fId, next, state, F , reqid = self._read(reg)
+                        # F - на момент запроса сохранена в базе
+                        # но на момент ответа Proposer может быть пересоздан с другим списком acceptors
+                        #  считаем что текущий список acceptors согласован и можно бы пересчитать данный F
+                        # ПОДУМАТЬ ОБ ЭТОМ!
+                        if len(infoList) >= F + 1:
+                            # число ответов достаточно чтобы вычислить результат и сообщить о нем
+                            def _publishResult(isConfirm: bool):
+                                self.accept2(reg, b, breq, F, fId, state, reqid, isConfirm)
+                            def _makrConfirmsAsHandled():
+                                cur.execute('update "' + self.aresptable(partition) + '" set handled=1 where id=?',
+                                                 (json.dumps([reg, breq]), ))
+                                cur.connection.commit()
+                                self._write(reg,b,None,None, None, None)
+                                # now proposer can work with reg again in other req
+                            # confirm OR conflict ?
+                            countConfirm = 0
+                            countConflict = 0
+                            for i in infoList:
+                                if i["acceptation"][0] != "CONFLICT":
+                                    countConfirm = countConfirm + 1
+                                else:
+                                    countConflict = countConflict + 1
 
-                        if countConfirm >= F + 1:
-                            _publishResult(True)
-                            _makrConfirmsAsHandled()
+                            if countConfirm >= F + 1:
+                                _publishResult(True)
+                                _makrConfirmsAsHandled()
 
-                        if countConflict >= F + 1:
-                            _publishResult(False)
-                            # если ответ is CONFLICT тоже пометить для удаления
-                            def _conflictRespAsHandled():
-                                for i in infoList:
-                                    self.cur.execute('update "' + self.aresptable(partition) + '" set handled=1 where '
-                                                     + ' id=? and zT=?', (i["id"], i["zT"]))
-                                self.cur.connection.commit()
-                            _conflictRespAsHandled()
-            except sqlite3.OperationalError as e:
-                if 'no such table:' not in str(e):
-                    print('ERROR when handle results', e)
-
+                            if countConflict >= F + 1:
+                                _publishResult(False)
+                                # если ответ is CONFLICT тоже пометить для удаления
+                                def _conflictRespAsHandled():
+                                    for i in infoList:
+                                        cur.execute('update "' + self.aresptable(partition) + '" set handled=1 where '
+                                                         + ' id=? and zT=?', (i["id"], i["zT"]))
+                                    cur.connection.commit()
+                                _conflictRespAsHandled()
+                except sqlite3.OperationalError as e:
+                    if 'no such table:' not in str(e):
+                        print('ERROR when handle results', e)
+        finally:
+            con.close()
 

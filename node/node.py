@@ -5,7 +5,7 @@ from subprocess import PIPE
 from pathlib import Path
 import os
 import pause
-from caspaxos_lib import AcceptorKorni3, ProposerKorni3 #partitionFromIndex
+from caspaxos_lib import AcceptorKorni3, ProposerKorni3
 
 
 def _checkAcceptorsReq(acceptor):

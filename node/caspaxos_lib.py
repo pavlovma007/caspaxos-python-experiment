@@ -184,6 +184,8 @@ class AcceptorKorni3(object) :
                                                     stdout=PIPE, stderr=PIPE)
                                 if p1.returncode == 1:
                                     print('ERROR Acceptor checkPrepareRequestsHandler ', p1.stdout.decode('utf-8'), p1.stderr.decode('utf-8'))
+                                if p1.returncode == 100:
+                                    print('ERROR db locked', p1.stderr.decode('utf-8'))
                                 return p1.returncode
                             ret = 100
                             for i in range(0, 10):
@@ -193,13 +195,15 @@ class AcceptorKorni3(object) :
                                     sleep(3)
                                     print('need repeat - db locked ....')
                                     ret = working(i)
+                            return ret == 0
 
                         if mayBeConfirm is not None:
-                            _sendPrepareResponse()
-
-                        # mark it handled for not handle again # its small hack but is normaly
-                        cur.execute('update "'+self.preqtable(partition)+'" set handled = true where id=? and zT = ?', (register, zT))
-                        cur.connection.commit()
+                            isOk = _sendPrepareResponse()
+                            if isOk:
+                                # mark it handled for not handle again # its small hack but is normaly
+                                cur.execute('update "'+self.preqtable(partition)+'" set handled = true where id=? and zT = ? and aid=?'
+                                            , (register, zT, self.mePubKey))
+                                cur.connection.commit()
                 except sqlite3.OperationalError as e:
                     pass
                     # print('ERROR ', e)
@@ -304,7 +308,8 @@ class ProposerKorni3(object):
                                      (table, name))
                     if not cur.fetchone():
                         cur.execute(createquery)
-                except sqlite3.OperationalError: pass
+                except sqlite3.OperationalError :
+                    pass
             for partition in self.partitions:
                 createIndex("proposer-register", "StateProposerLocal", 'CREATE INDEX "proposer-register" ON "StateProposerLocal" ( 	"register" );')
                 createIndex("presp-proposerid-handled-" + partition, "RESP-PREPARE-Part-" + partition,
@@ -423,7 +428,8 @@ class ProposerKorni3(object):
                 next = r[5] #scalar
                 try:
                     next = json.loads(next)
-                except Exception: pass
+                except Exception:
+                    next = None
                 reqid = r[6]
                 return (b,fId,next,state, F, reqid)
             else:
@@ -515,7 +521,7 @@ class ProposerKorni3(object):
             self._write(register, ballot_number, fId, nextValue, state, reqid)
             for acceptor in self.acceptors(partitionFromRegKey(register)):
                 self._sendAcceptRequest(acceptor, register, ballot_number, state) # RPC
-                time.sleep(2)  # TODO fix it
+                # time.sleep(1)  # TODO fix it
             # then wait and then when response quorum , and then - accept2
 
 
@@ -560,8 +566,9 @@ class ProposerKorni3(object):
                         next = record[4]
 
                         s_b,s_fId,s_next,s_state, s_F, s_reqid = self._read(reg)
-                        if s_reqid != 'NULL' :
-                            continue  # skip request . because now we already working
+                        # TODO так то разумно, что продолжаем работать по старому запросу, но если ошибка - то это блокирует работу...
+                        # if s_reqid != 'NULL' :
+                        #     continue  # skip request . because now we already working
 
                         # start challenge
                         self.receive(reg, fId, next, id)
@@ -578,7 +585,7 @@ class ProposerKorni3(object):
             con.close()
 
 
-    def checkPrepareConfirmsHandler_RESP_PREPARE(self):
+    def checkPrepareConfirmsHandler(self):
         try:
             cur, con = self.cur()
             for partition in self.partitions:

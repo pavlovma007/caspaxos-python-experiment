@@ -39,7 +39,7 @@ if __name__ == '__main__':
             a.checkAcceptRequestsHandler()
     def _checkPoposerRequests(proposerObject):
         proposerObject.checkInputRequest()
-        proposerObject.checkPrepareConfirmsHandler_RESP_PREPARE()
+        proposerObject.checkPrepareConfirmsHandler()
         proposerObject.checkAcceptConfirmsHandler()
 
     # a1 - acceptor.   [a1] - acceptors list

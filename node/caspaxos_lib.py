@@ -4,6 +4,9 @@ from subprocess import PIPE
 from change_functions import getFunction
 from time import sleep
 
+# CONST
+ISREQTOOLD = 3600
+
 def partitionFromIndex(index: int):
     if index < 0 or index > 4095:
         raise Exception('rtition index must be in [0..4095] interval')
@@ -476,15 +479,21 @@ class ProposerKorni3(object):
         # then the proposer defines the current state as PHI otherwise it picks the
         # value of the tuple with the highest ballot number.
         s_b, s_fId, s_next, _s_state, s_F, s_reqid = self._read(register)
-        state = None
-        if sum(total_list_of_confirmation_values) == 0:
-            state = 00          # default value 00
-        else:
+
+        def compute():
             highest_confirmation = self.get_highest_confirmation(confirmations)
             state = highest_confirmation[0]
+            return state
+        try:
+            if sum(total_list_of_confirmation_values) == 0: # because default value is 0
+                state = 00          # default value 00
+            else:
+                state = compute()
+        except TypeError:
+            state = compute()
+
         self._write(register, s_b, s_fId, s_next, state, s_reqid)
         self.send_accept(register, funcId, ballot, state, s_next, s_reqid)
-
 
     def _sendAcceptRequest(self, acceptor, register, ballot_number, new_state):
         data={"id": json.dumps([register, ballot_number]),  "type": 'accept', "aid": acceptor,
@@ -525,10 +534,10 @@ class ProposerKorni3(object):
             # then wait and then when response quorum , and then - accept2
 
 
-    def accept2(self, reg, b, breq, F, fId, state, reqid, isConfirm: bool):
+    def accept2(self, reg, b, breq, F, fId, state, reqid, isConfirm: bool, error: str = ''):
         if str(b) == str(breq):
             data = {"id": reqid, "reg": reg, "fId": fId,
-                    "b": b, "F": F,  # , "proposerId": self.mePubKey, - zU
+                    "b": b, "F": F, "err": error,
                     "result": 'CONFIRM' if isConfirm else 'CONFLICT',
                     "state": state,
                     "handled": False}
@@ -566,20 +575,29 @@ class ProposerKorni3(object):
                         next = record[4]
 
                         s_b,s_fId,s_next,s_state, s_F, s_reqid = self._read(reg)
-                        # TODO так то разумно, что продолжаем работать по старому запросу, но если ошибка - то это блокирует работу...
-                        # if s_reqid != 'NULL' :
-                        #     continue  # skip request . because now we already working
 
-                        # start challenge
-                        self.receive(reg, fId, next, id)
-
-                        fordelete.append( (id, zT) )
+                        b_now = self.generate_ballot_number()
+                        if s_reqid != None and b_now - s_b > ISREQTOOLD :
+                            # если "запрос" не обработан давно (более часа), то тупо метим его обработанным и выдаем ответ
+                            self.accept2(reg, b_now, b_now, s_F, s_fId, None, s_reqid, False, 'req too old - not handled more than hour')
+                            fordelete.append((reg, s_b))
+                            # self._write(reg, b_now, None, None, None, None)
+                        else:
+                            if s_reqid != 'NULL':
+                                # уже обрабатываем какой то запрос, надо сразу текущий запрос ответить, что облом
+                                self.accept2(reg, b_now, b_now, s_F, s_fId, None, s_reqid, False, 'proposer has req for key in handling')
+                                fordelete.append((reg, s_b))
+                            else:
+                                # start this "challenge"
+                                self.receive(reg, fId, next, id)
+                                fordelete.append( (id, zT) )
                     # mark req as handled
                     for id, zT in fordelete:
                         cur.execute('update "' + self.inreqtable(partition) + '" set handled=1 where id=? and zT=?',
                                          (id, zT))
                         cur.connection.commit()
-                except sqlite3.OperationalError:
+                except sqlite3.OperationalError as e:
+                    # print(e)
                     pass
         finally:
             con.close()
@@ -621,7 +639,7 @@ class ProposerKorni3(object):
 
                                     # mark req as handled
                                     cur.execute('update "' + self.presptable(partition) +
-                                                     '"  set handled=1 where proposerId=? ' + 'and b=? and id=?  ',
+                                                     '"  set handled=1 where proposerId=? and b=? and id=?  ',
                                                  (self.mePubKey, b, reg))
                                     cur.connection.commit()
                             except Exception as e:
@@ -656,7 +674,7 @@ class ProposerKorni3(object):
                     for reg, breq in confirmations:
                         infoList = confirmations[(reg, breq)]
                         b, fId, next, state, F , reqid = self._read(reg)
-                        # F - на момент запроса сохранена в базе
+                        # F - на моменcaspaxos_lib.pyт запроса сохранена в базе
                         # но на момент ответа Proposer может быть пересоздан с другим списком acceptors
                         #  считаем что текущий список acceptors согласован и можно бы пересчитать данный F
                         # ПОДУМАТЬ ОБ ЭТОМ!
